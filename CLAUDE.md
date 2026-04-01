@@ -45,3 +45,9 @@ make fmt            # auto-format
 ## When modifying the sim engine
 1. Write a regression test in `tests/regression/` first.
 2. Keep a golden output snapshot in `tests/golden/` if behaviour changes.
+
+## Hard Rules
+- **Never rewrite public interfaces without permission.**
+- **Prefer minimal diffs** — change only what's needed.
+- **Always run tests after code edits** — `make check` before every commit.
+- **Never touch submission code without explicit instruction.**
