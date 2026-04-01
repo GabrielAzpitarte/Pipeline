@@ -39,7 +39,7 @@ jobs:
         run: ruff check src/ tests/
 
       - name: Type check
-        run: mypy src/
+        run: mypy -p trader -p sim -p data -p experiments -p analytics -p agents -p submission
 
       - name: Test
         run: pytest tests/ --tb=short -q
