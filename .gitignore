@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+
+# Data & artifacts (never commit large files)
+data_raw/
+data_processed/
+artifacts/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# OS
+.DS_Store
+Thumbs.db
