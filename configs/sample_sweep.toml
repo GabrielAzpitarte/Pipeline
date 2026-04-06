@@ -1,0 +1,20 @@
+[experiment]
+name = "noop_sweep_example"
+strategy = "noop"
+dataset_description = "sample fixture data - sweep demo"
+tags = ["sweep", "test"]
+
+[data]
+prices = "tests/fixtures/sample_prices.csv"
+trades = "tests/fixtures/sample_trades.csv"
+
+[sim]
+trade_match_mode = "all"
+
+[params]
+# Default params (used if no [sweep] section)
+
+[sweep]
+# Noop ignores params, but this demonstrates the sweep format.
+# Replace with real strategy param names and value ranges.
+_placeholder = [1, 2, 3]

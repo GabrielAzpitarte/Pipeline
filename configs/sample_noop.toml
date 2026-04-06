@@ -1,0 +1,12 @@
+[experiment]
+name = "noop_baseline"
+strategy = "noop"
+dataset_description = "sample fixture data"
+tags = ["baseline", "test"]
+
+[data]
+prices = "tests/fixtures/sample_prices.csv"
+trades = "tests/fixtures/sample_trades.csv"
+
+[sim]
+trade_match_mode = "all"

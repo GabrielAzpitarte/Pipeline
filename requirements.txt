@@ -9,6 +9,9 @@ pydantic>=2.5
 python-dotenv>=1.0
 rich>=13.7
 typer>=0.9
+anthropic>=0.39
+openai>=1.0
+google-genai>=1.0
 
 # Dev
 pytest>=7.4

@@ -1,0 +1,12 @@
+Strategy: aggressive_skew_v1 (Gemini 3.1 Pro, Round 2)
+Date submitted: 2026-04-02
+Source: 10-round orchestrator with explore/exploit + structured memory
+Cost: $2.37 for 10 rounds
+
+Local backtest (calibrated, 2K ticks, fill_probability=0.19):
+  PnL: 1336
+  Expected platform PnL: ~1600-1800 (backtester underestimates ~25%)
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:

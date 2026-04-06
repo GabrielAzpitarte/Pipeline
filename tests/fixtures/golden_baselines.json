@@ -1,0 +1,26 @@
+{
+  "market_maker_both_sides": {
+    "strategy": "market_maker",
+    "params": {"spread": 4, "order_size": 3},
+    "total_fills": 2,
+    "final_positions": {"AMETHYSTS": 0},
+    "final_cash": 12.0,
+    "final_pnl": 12.0
+  },
+  "fair_value_passive": {
+    "strategy": "fair_value",
+    "params": {"edge": 2, "order_size": 4},
+    "total_fills": 2,
+    "final_positions": {"AMETHYSTS": 0},
+    "final_cash": 16.0,
+    "final_pnl": 16.0
+  },
+  "inventory_mm_zero_pos": {
+    "strategy": "inventory_mm",
+    "params": {"base_spread": 4, "order_size": 3, "skew_factor": 1.0},
+    "total_fills": 2,
+    "final_positions": {"AMETHYSTS": 0},
+    "final_cash": 12.0,
+    "final_pnl": 12.0
+  }
+}

@@ -1,0 +1,12 @@
+Strategy: pennying_dynamic_v1 (Gemini 3.1 Pro R1 + sweep unwind=40)
+Date submitted: 2026-04-02
+Source: 5-round orchestrator with architecture-level prompts
+Cost: $1.35 for 5 rounds
+
+Local backtest (10K ticks, fill_probability=0.19):
+  PnL: 23014
+  Note: 10K ticks, platform uses ~2K. Expect ~4000-5000 on platform.
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:

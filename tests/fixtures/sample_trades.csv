@@ -1,0 +1,7 @@
+day;timestamp;buyer;seller;symbol;currency;price;quantity
+1;100;bot_a;bot_b;RAINFOREST_RESIN;SEASHELLS;10000;5
+1;100;bot_c;bot_d;KELP;SEASHELLS;2052;3
+1;200;bot_b;bot_a;RAINFOREST_RESIN;SEASHELLS;10001;8
+1;200;bot_d;bot_c;KELP;SEASHELLS;2053;4
+1;300;bot_a;bot_c;RAINFOREST_RESIN;SEASHELLS;9999;6
+1;300;bot_b;bot_d;KELP;SEASHELLS;2055;5

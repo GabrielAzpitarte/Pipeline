@@ -1,0 +1,96 @@
+[
+  {
+    "timestamp": 100,
+    "traderData": "",
+    "listings": {
+      "RAINFOREST_RESIN": {"symbol": "RAINFOREST_RESIN", "product": "RAINFOREST_RESIN", "denomination": "SEASHELLS"}
+    },
+    "order_depths": {
+      "RAINFOREST_RESIN": {
+        "buy_orders": {"9998": 10, "9996": 25, "9994": 15},
+        "sell_orders": {"10002": -10, "10004": -20, "10006": -15}
+      }
+    },
+    "own_trades": {},
+    "market_trades": {
+      "RAINFOREST_RESIN": [
+        {"symbol": "RAINFOREST_RESIN", "price": 10000, "quantity": 5, "buyer": "bot_a", "seller": "bot_b", "timestamp": 50}
+      ]
+    },
+    "position": {},
+    "observations": {}
+  },
+  {
+    "timestamp": 200,
+    "traderData": "",
+    "listings": {
+      "KELP": {"symbol": "KELP", "product": "KELP", "denomination": "SEASHELLS"}
+    },
+    "order_depths": {
+      "KELP": {
+        "buy_orders": {},
+        "sell_orders": {}
+      }
+    },
+    "own_trades": {},
+    "market_trades": {},
+    "position": {},
+    "observations": {}
+  },
+  {
+    "timestamp": 300,
+    "traderData": "",
+    "listings": {
+      "AMETHYSTS": {"symbol": "AMETHYSTS", "product": "AMETHYSTS", "denomination": "SEASHELLS"}
+    },
+    "order_depths": {
+      "AMETHYSTS": {
+        "buy_orders": {"9999": 5, "9998": 10},
+        "sell_orders": {"10001": -5, "10002": -10}
+      }
+    },
+    "own_trades": {},
+    "market_trades": {},
+    "position": {"AMETHYSTS": 15},
+    "observations": {}
+  },
+  {
+    "timestamp": 400,
+    "traderData": "",
+    "listings": {
+      "RAINFOREST_RESIN": {"symbol": "RAINFOREST_RESIN", "product": "RAINFOREST_RESIN", "denomination": "SEASHELLS"},
+      "KELP": {"symbol": "KELP", "product": "KELP", "denomination": "SEASHELLS"}
+    },
+    "order_depths": {
+      "RAINFOREST_RESIN": {
+        "buy_orders": {"9998": 10},
+        "sell_orders": {"10002": -10}
+      },
+      "KELP": {
+        "buy_orders": {"2050": 20},
+        "sell_orders": {"2055": -20}
+      }
+    },
+    "own_trades": {},
+    "market_trades": {},
+    "position": {"RAINFOREST_RESIN": 5, "KELP": -10},
+    "observations": {}
+  },
+  {
+    "timestamp": 500,
+    "traderData": "{\"prev_mid\": 10000}",
+    "listings": {
+      "SQUID_INK": {"symbol": "SQUID_INK", "product": "SQUID_INK", "denomination": "SEASHELLS"}
+    },
+    "order_depths": {
+      "SQUID_INK": {
+        "buy_orders": {"5000": 10},
+        "sell_orders": {"5010": -10}
+      }
+    },
+    "own_trades": {},
+    "market_trades": {},
+    "position": {},
+    "observations": {}
+  }
+]

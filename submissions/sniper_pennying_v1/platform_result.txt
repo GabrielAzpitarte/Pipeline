@@ -1,0 +1,13 @@
+Strategy: sniper_pennying_v1 (Gemini 3.1 Pro R4 + sweep ema_alpha=0.25)
+Date submitted: 2026-04-02
+Source: 5-round orchestrator with fixed backtester (jmerle semantics)
+Cost: $1.41
+
+Local backtest (10K ticks, jmerle matching, ALL mode):
+  PnL: 15072
+  Backtester overestimates ~5x (normal for jmerle)
+  Expected platform PnL: ~3000
+
+Platform result:
+  PnL: 2.2k
+  Notes:

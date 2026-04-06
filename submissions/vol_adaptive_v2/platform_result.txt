@@ -1,0 +1,12 @@
+Strategy: vol_adaptive_v2 (o4-mini Round 9 + parameter sweep)
+Date submitted: 2026-04-02
+Source: 10-round orchestrator, sweep improved ema_alpha 0.2→0.3
+Cost: $2.00 for 10 rounds
+
+Local backtest (10K ticks, fill_probability=0.19):
+  PnL: 10655
+  Note: 10K ticks vs platform's ~2K, so expect ~2000-2500 on platform
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:
