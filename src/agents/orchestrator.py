@@ -18,7 +18,9 @@ from agents.prompts.ideation import build_ideation_prompt
 from agents.prompts.patching import build_patching_prompt
 from agents.tools.strategy_tools import (
     cleanup_strategy,
+    extract_params,
     load_strategy_module,
+    parse_platform_log,
     register_strategy_import,
     run_strategy_experiment,
     run_tests,
@@ -319,6 +321,34 @@ class Orchestrator:
                 return {"candidates": []}
         return {"candidates": []}  # all attempts exhausted
 
+    def _load_platform_summary(self) -> str:
+        """Load the latest platform log and return a summary string."""
+        submissions_dir = Path("submissions")
+        if not submissions_dir.exists():
+            return ""
+        # Find the most recent submission with logs
+        latest_json: Path | None = None
+        latest_mtime = 0.0
+        for json_file in submissions_dir.rglob("*.json"):
+            if json_file.stat().st_mtime > latest_mtime:
+                latest_mtime = json_file.stat().st_mtime
+                latest_json = json_file
+        if latest_json is None:
+            return ""
+        try:
+            result = parse_platform_log(latest_json)
+            lines = [f"Platform PnL: {result['total_pnl']:.0f}"]
+            for prod, pnl in result.get("per_product_pnl", {}).items():
+                fills = result.get("per_product_fills", {}).get(prod, 0)
+                lines.append(f"  {prod}: PnL={pnl:.0f}, fills={fills}")
+            pos = result.get("final_positions", {})
+            if pos:
+                lines.append(f"  Final positions: {pos}")
+            return "\n".join(lines)
+        except Exception as exc:
+            _log.warning("Could not parse platform log %s: %s", latest_json, exc)
+            return ""
+
     # ---- Multi-model ideation ---------------------------------------------
 
     def _ideate(self, round_num: int) -> list[dict[str, Any]]:
@@ -331,6 +361,9 @@ class Orchestrator:
 
         best_card = self.memory.best_strategy_card()
         best_code = best_card.get("code", "") if best_card else ""
+
+        # Load latest platform log summary if available
+        platform_summary = self._load_platform_summary()
 
         # Gemini ideation — 1 candidate
         if self._gemini_client is not None:
@@ -346,6 +379,7 @@ class Orchestrator:
                     round_num,
                     best_code,
                     best_card,
+                    platform_summary,
                 )
                 result = self._call_gemini(messages, system=system)
                 for c in result.get("candidates", [])[:1]:
@@ -369,6 +403,7 @@ class Orchestrator:
                     round_num,
                     best_code,
                     best_card,
+                    platform_summary,
                 )
                 result = self._call_openai(messages, system=system)
                 for c in result.get("candidates", [])[:1]:
@@ -439,35 +474,72 @@ class Orchestrator:
         return cr
 
     def _build_strategy_card(self, cr: CandidateResult, round_num: int) -> dict[str, Any]:
-        """Build a strategy card from a candidate result."""
-        pnl = (cr.faithful_metrics or {}).get("total_pnl", 0.0)
+        """Build a rich strategy card with per-product metrics, params, and analysis."""
+        metrics = cr.faithful_metrics or {}
+        pnl = metrics.get("total_pnl", 0.0)
+        per_product: dict[str, Any] = metrics.get("per_product") or {}  # type: ignore[assignment]
+        sharpe = metrics.get("sharpe", 0.0)
+        max_dd = metrics.get("max_drawdown", 0.0)
+        total_fills = metrics.get("total_fills", 0.0)
+        max_pos = metrics.get("max_position", 0.0)
+
+        # Extract actual params from code
+        params: dict[str, Any] = {}
+        if cr.code:
+            params = extract_params(cr.code)
+
+        # Auto-generate strengths
+        strengths_list: list[str] = []
+        if total_fills > 500:
+            strengths_list.append("high fill rate")
+        if max_pos < 40:
+            strengths_list.append("good inventory control")
+        if sharpe > 1.0:
+            strengths_list.append("consistent returns")
+        if per_product:
+            fill_counts = [v.get("fill_count", 0) for v in per_product.values()]
+            if fill_counts and min(fill_counts) > 0.3 * max(fill_counts):
+                strengths_list.append("balanced across products")
+
+        # Auto-generate failure reason with per-product detail
+        failure_reason = ""
+        if cr.error:
+            failure_reason = f"code error: {cr.error[:100]}"
+        elif pnl < -1000:
+            details = []
+            if max_pos > 70:
+                details.append("hit position limits")
+            for prod, pm in per_product.items():
+                if pm.get("fill_count", 0) == 0:
+                    details.append(f"no fills on {prod}")
+            failure_reason = "catastrophic loss"
+            if details:
+                failure_reason += f" — {', '.join(details)}"
+        elif pnl < 0:
+            failure_reason = "negative PnL"
+            if sharpe < -0.5:
+                failure_reason += " — negative risk-adjusted returns"
+        elif pnl == 0:
+            failure_reason = "zero fills"
+
         card: dict[str, Any] = {
             "name": cr.name,
             "source_model": cr.source_model,
             "description": cr.description,
             "pnl": pnl,
             "round": round_num,
-            "params": {},
-            "strengths": "",
+            "params": params,
+            "per_product": per_product,
+            "sharpe": sharpe,
+            "max_drawdown": max_dd,
+            "total_fills": total_fills,
+            "strengths": ", ".join(strengths_list) if strengths_list else "",
             "status": "",
             "error": cr.error,
             "products": sorted(self.data.products),
+            "failure_reason": failure_reason,
         }
-        # Add failure reason for learning
-        if cr.error:
-            card["failure_reason"] = f"code error: {cr.error[:100]}"
-        elif pnl < -1000:
-            card["failure_reason"] = (
-                "catastrophic loss — likely parameter blowup or runaway inventory"
-            )
-        elif pnl < 0:
-            card["failure_reason"] = "negative PnL — strategy logic loses money"
-        elif pnl == 0:
-            card["failure_reason"] = "zero fills — orders never matched (pricing/spread issue)"
-        else:
-            card["failure_reason"] = ""
 
-        # Store code for successful strategies (top 3 pruned later)
         if not cr.error and pnl >= 0 and cr.code:
             card["code"] = cr.code
         return card

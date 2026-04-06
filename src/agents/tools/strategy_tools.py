@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -27,10 +28,7 @@ def _validate_name(name: str) -> None:
 
 
 def write_strategy_file(name: str, code: str, strategies_dir: Path) -> Path:
-    """Write a strategy .py file. Returns the written path.
-
-    Safety: validates name and checks path does not escape strategies_dir.
-    """
+    """Write a strategy .py file. Returns the written path."""
     _validate_name(name)
     target = (strategies_dir / f"{name}.py").resolve()
     if not str(target).startswith(str(strategies_dir.resolve())):
@@ -84,6 +82,23 @@ def run_tests(project_root: Path) -> tuple[bool, str]:
     return passed, output
 
 
+def extract_params(code: str) -> dict[str, Any]:
+    """Extract parameter defaults from strategy code.
+
+    Parses patterns like: p.get("ema_alpha", 0.25)
+    """
+    params: dict[str, Any] = {}
+    for match in re.finditer(r'p\.get\("(\w+)",\s*([^)]+)\)', code):
+        key = match.group(1)
+        val_str = match.group(2).strip()
+        try:
+            parsed: Any = float(val_str) if "." in val_str else int(val_str)
+        except ValueError:
+            parsed = val_str.strip('"').strip("'")
+        params[key] = parsed
+    return params
+
+
 def run_strategy_experiment(
     strategy_name: str,
     data: BacktestData,
@@ -91,8 +106,9 @@ def run_strategy_experiment(
     fast: bool = True,
     artifacts_dir: Path | None = None,
     data_split: float = 1.0,
-) -> dict[str, float]:
-    """Run an experiment and return the metrics dict."""
+) -> dict[str, Any]:
+    """Run an experiment and return metrics + per-product breakdown."""
+    from analytics.metrics import per_product_metrics
     from sim.engine import SimConfig
 
     config = SimConfig(
@@ -110,7 +126,59 @@ def run_strategy_experiment(
         artifacts_dir=artifacts_dir,
         fast=fast,
     )
-    return result.metrics
+    metrics: dict[str, Any] = dict(result.metrics)
+    if result.run_data:
+        metrics["per_product"] = per_product_metrics(result.run_data)
+    return metrics
+
+
+def parse_platform_log(json_path: Path) -> dict[str, Any]:
+    """Parse platform results JSON into a structured summary."""
+    with open(json_path) as f:
+        data = json.load(f)
+
+    profit = data.get("profit", 0.0)
+    positions = data.get("positions", [])
+
+    # Parse activities log for per-product PnL
+    activities_raw = data.get("activitiesLog", "")
+    lines = activities_raw.strip().split("\n")
+
+    per_product_pnl: dict[str, float] = {}
+    per_product_fills: dict[str, int] = {}
+    prev_pnl: dict[str, float] = {}
+
+    for line in lines[1:]:  # skip header
+        parts = line.split(";")
+        if len(parts) < 17:
+            continue
+        product = parts[2]
+        pnl = float(parts[-1])
+
+        if product not in prev_pnl:
+            prev_pnl[product] = 0.0
+            per_product_fills[product] = 0
+
+        if pnl != prev_pnl[product]:
+            per_product_fills[product] += 1
+            prev_pnl[product] = pnl
+
+        per_product_pnl[product] = pnl
+
+    tick_set: set[str] = set()
+    for row in lines[1:]:
+        row_parts = row.split(";")
+        if len(row_parts) > 2:
+            tick_set.add(row_parts[1])
+    ticks = len(tick_set)
+
+    return {
+        "total_pnl": profit,
+        "ticks": ticks,
+        "per_product_pnl": per_product_pnl,
+        "per_product_fills": per_product_fills,
+        "final_positions": {p["symbol"]: p["quantity"] for p in positions},
+    }
 
 
 def cleanup_strategy(name: str, strategies_dir: Path, init_path: Path) -> None:

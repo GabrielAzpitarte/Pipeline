@@ -35,8 +35,9 @@ def build_ideation_prompt(
     round_num: int = 1,
     best_strategy_code: str = "",
     best_strategy_card: dict[str, Any] | None = None,
+    platform_summary: str = "",
 ) -> tuple[str, list[dict[str, str]]]:
-    """Build the ideation prompt. No modes, no constraints — just data and freedom."""
+    """Build the ideation prompt with rich per-product data and param history."""
     playbook = _load_playbook()
 
     # Strategy code examples
@@ -44,28 +45,57 @@ def build_ideation_prompt(
     for name, code in strategy_examples.items():
         examples_text += f"\n--- {name}.py ---\n{code}\n"
 
-    # Results so far
+    # Results so far — with per-product and params
     results_text = ""
     if top_strategies:
         results_text = "\n## Previous results (ranked by PnL)\n"
-        for i, card in enumerate(top_strategies[:10], 1):
+        for i, card in enumerate(top_strategies[:8], 1):
             status = " <<<< CURRENT BEST" if card.get("status") == "best" else ""
+            sharpe = card.get("sharpe", 0)
+            fills = card.get("total_fills", 0)
+            strengths = card.get("strengths", "")
             results_text += (
                 f"{i}. {card.get('name', '?')} ({card.get('source_model', '?')}) "
-                f"— PnL={card.get('pnl', 0):.0f}{status}\n"
-                f"   {card.get('description', '')[:150]}\n"
+                f"— PnL={card.get('pnl', 0):.0f} [sharpe={sharpe:.1f}, fills={fills:.0f}]{status}\n"
             )
+            # Per-product breakdown
+            pp = card.get("per_product", {})
+            if pp:
+                for prod, pm in sorted(pp.items()):
+                    fc = pm.get("fill_count", 0)
+                    vol = pm.get("total_volume", 0)
+                    results_text += f"   {prod}: {fc:.0f} fills, vol={vol:.0f}\n"
+            # Params
+            params = card.get("params", {})
+            if params:
+                param_str = ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
+                results_text += f"   Params: {param_str}\n"
+            if strengths:
+                results_text += f"   Strengths: {strengths}\n"
 
+    # Parameter history — what values have been tried and their PnL
+    param_history_text = ""
+    all_cards = [*top_strategies, *failed_strategies]
+    param_values: dict[str, list[tuple[Any, float]]] = {}
+    for card in all_cards:
+        card_pnl = card.get("pnl", 0)
+        for k, v in card.get("params", {}).items():
+            param_values.setdefault(k, []).append((v, card_pnl))
+    if param_values:
+        param_history_text = "\n## Parameter history (explored ranges)\n"
+        for param, vals in sorted(param_values.items()):
+            unique = sorted(set(vals), key=lambda x: x[1], reverse=True)[:6]
+            entries = [f"{v}→{pnl:.0f}" for v, pnl in unique]
+            best_v, best_pnl = unique[0]
+            param_history_text += f"- **{param}**: {', '.join(entries)} [peak: {best_v}]\n"
+
+    # Failed strategies with specific reasons
     fail_text = ""
     if failed_strategies:
         fail_text = "\n## What failed (don't repeat these)\n"
         for card in failed_strategies[:5]:
             reason = card.get("failure_reason", "unknown")
-            fail_text += (
-                f"- {card.get('name', '?')} — PnL={card.get('pnl', 0):.0f} "
-                f"[{reason}]\n"
-                f"  {card.get('description', '')[:100]}\n"
-            )
+            fail_text += f"- {card.get('name', '?')} — PnL={card.get('pnl', 0):.0f} [{reason}]\n"
 
     # Best strategy code
     best_code_text = ""
@@ -98,13 +128,23 @@ def build_ideation_prompt(
         "- Be bold — the backtester is cheap, try things out"
     )
 
+    # Platform feedback
+    platform_text = ""
+    if platform_summary:
+        platform_text = (
+            f"\n## Real platform feedback (from previous submission — use for calibration)\n"
+            f"{platform_summary}\n"
+        )
+
     user_msg = f"""## Objective
 {objective}
 
 {knowledge_text}
 {results_text}
+{param_history_text}
 {fail_text}
 {best_code_text}
+{platform_text}
 
 ## Reference implementations
 {examples_text}
