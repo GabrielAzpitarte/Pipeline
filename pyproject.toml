@@ -40,6 +40,7 @@ where = ["src"]
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+exclude = ["test_strategies"]
 
 [tool.ruff.lint]
 select = [
@@ -58,12 +59,13 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # datamodel.py must match Prosperity's camelCase API exactly.
 "src/trader/datamodel.py" = ["N803"]
+"src/trader/strategies/microprice_sniper_proven.py" = ["N803"]
 # TradingStateSchema field names must match Prosperity JSON keys.
 "src/data/schemas.py" = ["N815"]
 # typer uses function calls in argument defaults (standard pattern).
 "src/experiments/cli.py" = ["B008"]
 # Submission files use Prosperity's camelCase API.
-"submissions/**/*.py" = ["N803", "N815"]
+"submissions/**/*.py" = ["N803", "N805", "N815", "E402", "E701", "E702", "F841", "RUF013"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["trader", "sim", "data", "experiments", "analytics", "agents", "submission"]

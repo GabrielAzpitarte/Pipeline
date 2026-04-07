@@ -1,34 +1,33 @@
 # Product Briefs — Tutorial Round
 
 ## EMERALDS
-- **Fair value:** Fixed at 10,000 (stationary)
-- **Spread:** ~16 ticks (bids ~9992, asks ~10008)
-- **Position limit:** 80
+- Fair value: 10,000 (stationary). Spread ~16. Limit 80.
+- Best platform PnL: ~1050 (from taker_penny). 29 fills / 2000 ticks.
 
 ## TOMATOES
-- **Fair value:** Drifts randomly
-- **Spread:** ~14 ticks
-- **Position limit:** 80
+- Fair value: drifts. Spread ~14. Limit 80.
+- Best platform PnL: ~1468 (from taker_penny). 1935 fills / 2000 ticks.
+- TOMATOES = ~60% of total PnL. Most room for improvement.
 
 ## Round 1 results
-- agent_r1_adaptive_pennying_with_unwind (gemini): PnL=0 [BAD] — A dual-product strategy utilizing fair-value anchoring, pennying for queue prior
-- agent_r1_dual_product_adaptive_mm (openai): PnL=-6413 [BAD] — Architecture: A unified inventory‐aware market maker that handles EMERALDS and T
+- agent_r1_dynamic_penny_obi (gemini): PnL=0 [BAD] — Aggressive taker and pennying strategy using EMA combined with Order Book Imbala
+- agent_r1_liquidity_momentum_sniper (openai): PnL=15003 [GOOD] — Hybrid market-making and sniping strategy that uses static fair value for EMERAL
 
 ## Round 2 results
-- agent_r2_dynamic_inventory_pennying_mm (gemini): PnL=0 [BAD] — Dual-product market maker using fixed fair value for EMERALDS and EMA of mid-pri
-- agent_r2_volatility_skewed_dual_mm (openai): PnL=173 [weak] — This strategy is a dual-product market maker that adapts to both static and drif
+- agent_r2_asset_specific_hybrid_penny (gemini): PnL=10475 [GOOD] — Combines the best performing asset-specific logics: strict taker/pennying for EM
+- agent_r2_adaptive_inventory_sniper (openai): PnL=0 [BAD] — Hybrid inventory-aware market maker with volatility-adaptive sniping and mean-re
 
 ## Round 3 results
-- agent_r3_agent_r3_pennying_inventory_unwind (gemini): PnL=12969 [GOOD] — Dual-product market maker using strict pennying (best_bid + 1, best_ask - 1) for
-- agent_r3_adaptive_multisignal_dual_mm (openai): PnL=3114 [GOOD] — Dual‐product inventory‐aware market maker that fuses multiple signals: anchor EM
+- agent_r3_asset_specialized_hybrid (gemini): PnL=0 [BAD] — Bifurcates logic completely between stationary (EMERALDS) and drifting (TOMATOES
+- agent_r3_asset_specific_hybrid_sniper (openai): PnL=0 [BAD] — An asset-specific hybrid that combines aggressive taker/pennying for the station
 
 ## Round 4 results
-- agent_r4_agent_r4_sniper_pennying_dual_mm (gemini): PnL=14646 [GOOD] — Advanced dual-product strategy combining liquidity taking (sniping mispriced ord
-- agent_r4_adaptive_vol_corr_skew_mm (openai): PnL=2203 [GOOD] — Dual‐product inventory‐aware market maker that blends dynamic spread management,
+- agent_r4_bifurcated_specialist_sniper (gemini): PnL=13565 [GOOD] — Asset-specific logic combining the best EMERALDS taker/pennying with the best TO
+- agent_r4_asset_specific_inventory_hybrid (openai): PnL=0 [BAD] — Hybrid strategy splitting logic by asset: EMERALDS uses inventory‐aware market m
 
 ## Round 5 results
-- agent_r5_agent_r5_microprice_imbalance_sniper_mm (gemini): PnL=0 [BAD] — Advanced dual-product market maker that builds on the winning sniper-pennying ar
-- agent_r5_sniper_mean_reversion_inventory_mm (openai): PnL=13048 [GOOD] — Dual‐product market maker that combines passive liquidity providing, opportunist
+- agent_r5_best_of_both_specialist (gemini): PnL=0 [BAD] — Bifurcated logic combining the best performing EMERALDS taker/pennying with the
+- agent_r5_bifurcated_taker_sniper_hybrid (openai): PnL=-3036 [BAD] — A two‐legged asset‐specific strategy: EMERALDS are handled with a static taker‐p
 
 ## Round 1 results
 

@@ -32,4 +32,5 @@ def register(name: str) -> Any:
 import trader.strategies.fair_value as _fair_value  # noqa: F401, E402
 import trader.strategies.inventory_mm as _inventory_mm  # noqa: F401, E402
 import trader.strategies.market_maker as _market_maker  # noqa: F401, E402
+import trader.strategies.microprice_sniper_proven as _microprice_sniper_proven  # noqa: F401, E402
 import trader.strategies.noop as _noop  # noqa: F401, E402

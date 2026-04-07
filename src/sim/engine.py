@@ -30,6 +30,7 @@ class SimConfig:
     """Configuration knobs for the simulation."""
 
     trade_match_mode: TradeMatchingMode = TradeMatchingMode.ALL
+    queue_penetration: float = 1.0  # jmerle default — full market trade volume available
     strategy_name: str = "noop"
     risk_limits: RiskLimits = field(default_factory=lambda: RiskLimits(max_order_size=9999))
     strategy_params: dict[str, Any] = field(default_factory=dict)
@@ -138,9 +139,19 @@ class SimEngine:
                         timestamp=tr.timestamp,
                     )
                     trades_list.append(t)
-                    mt_list.append(
-                        MarketTrade(trade=t, buy_quantity=tr.quantity, sell_quantity=tr.quantity)
+                    # Apply queue penetration: scale available volume
+                    qp = self.config.queue_penetration
+                    bq = (
+                        max(1, round(tr.quantity * qp))
+                        if qp < 1.0 and tr.quantity > 0
+                        else tr.quantity
                     )
+                    sq = (
+                        max(1, round(tr.quantity * qp))
+                        if qp < 1.0 and tr.quantity > 0
+                        else tr.quantity
+                    )
+                    mt_list.append(MarketTrade(trade=t, buy_quantity=bq, sell_quantity=sq))
                 raw_trades[product] = trades_list
                 market_trades_mt[product] = mt_list
 
@@ -170,7 +181,7 @@ class SimEngine:
             # 5. Enforce Prosperity-faithful all-or-nothing position limits
             valid_orders = enforce_limits(raw_orders, positions)
 
-            # 6. Match orders (mutates order_depths and market_trades)
+            # 6. Match orders (jmerle/prosperity4bt semantics — no queue modeling)
             fills = match_orders(
                 valid_orders,
                 order_depths,

@@ -208,3 +208,63 @@ class TestMatchOrders:
         orders = {"A": [Order("A", 100, 0)]}
         fills = match_orders(orders, {"A": depth}, {})
         assert fills == {}
+
+
+class TestQueuePositionModeling:
+    def test_queue_consumes_trade_at_same_price(self) -> None:
+        """Existing book volume at order price eats the market trade first."""
+        depth = _make_depth()
+        mt = _mt("A", 9993, 15)
+        # 20 units ahead of us in the buy queue at 9993
+        bq: dict[int, int] = {9993: 20}
+        fills = match_buy_order(Order("A", 9993, 5), depth, [mt], buy_queue_remaining=bq)
+        # Trade of 15 gets eaten by queue (15 consumed from 20 ahead)
+        # Nothing left for us
+        assert fills == []
+        assert bq[9993] == 5  # 20 - 15 = 5 still ahead
+
+    def test_queue_overflow_gives_us_fills(self) -> None:
+        """When trade exceeds queue, overflow fills our order."""
+        depth = _make_depth()
+        mt = _mt("A", 9993, 25)
+        bq: dict[int, int] = {9993: 10}
+        fills = match_buy_order(Order("A", 9993, 5), depth, [mt], buy_queue_remaining=bq)
+        # 25 trade - 10 queue = 15 overflow. We take 5.
+        assert len(fills) == 1
+        assert fills[0].quantity == 5
+        assert 9993 not in bq  # queue fully consumed
+
+    def test_no_queue_at_better_price(self) -> None:
+        """At strictly better price, no queue consumption — direct fill."""
+        depth = _make_depth()
+        mt = _mt("A", 9990, 10)  # better price than our 9993
+        bq: dict[int, int] = {9993: 20}
+        fills = match_buy_order(Order("A", 9993, 5), depth, [mt], buy_queue_remaining=bq)
+        assert len(fills) == 1
+        assert fills[0].quantity == 5
+        assert bq[9993] == 20  # queue not touched
+
+    def test_no_queue_map_means_no_queue(self) -> None:
+        """Without queue map, all trades fill directly (backward compat)."""
+        depth = _make_depth()
+        mt = _mt("A", 9993, 10)
+        fills = match_buy_order(Order("A", 9993, 5), depth, [mt])
+        assert len(fills) == 1
+        assert fills[0].quantity == 5
+
+    def test_sell_queue_works(self) -> None:
+        """Queue modeling works for sell orders too."""
+        depth = _make_depth()
+        mt = _mt("A", 10007, 15)
+        sq: dict[int, int] = {10007: 20}
+        fills = match_sell_order(Order("A", 10007, -5), depth, [mt], sell_queue_remaining=sq)
+        assert fills == []  # queue eats the trade
+
+    def test_match_orders_passes_queues(self) -> None:
+        """match_orders correctly passes queue maps through."""
+        depth = _make_depth()
+        mt = _mt("A", 9993, 10)
+        orders = {"A": [Order("A", 9993, 5)]}
+        bq = {"A": {9993: 20}}
+        fills = match_orders(orders, {"A": depth}, {"A": [mt]}, buy_queues=bq, sell_queues={})
+        assert fills == {}  # queue ate the trade

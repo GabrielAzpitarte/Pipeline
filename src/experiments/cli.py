@@ -55,16 +55,52 @@ def sweep(
     metric: str = typer.Option("total_pnl", "--metric", "-m"),
     top_n: int = typer.Option(10, "--top", "-n"),
     artifacts_dir: Path | None = typer.Option(None, "--artifacts-dir"),
+    parallel: int = typer.Option(0, "--parallel", "-j", help="Number of workers (0=sequential)"),
 ) -> None:
     """Run a parameter sweep from a TOML config file."""
     from experiments.config import load_config
     from experiments.sweep_runner import run_sweep
 
     cfg = load_config(config)
-    results = run_sweep(cfg, fast=fast, artifacts_dir=artifacts_dir)
 
-    ranked = sorted(results, key=lambda r: r.metrics.get(metric, 0.0), reverse=True)
-    _print_sweep_results(ranked[:top_n], metric)
+    if parallel > 0:
+        from data.parse_logs import load_round_data
+        from experiments.sweep_runner import export_sweep_winners, run_sweep_parallel
+
+        data = load_round_data(cfg.prices_path, cfg.trades_path)
+        sweep_section = cfg.raw.get("sweep", {})
+        if not sweep_section:
+            sweep_section = {k: [v] for k, v in cfg.strategy_params.items()}
+
+        strategy_path = Path(f"src/trader/strategies/{cfg.strategy}.py")
+        source = strategy_path.read_text() if strategy_path.exists() else ""
+        if not source:
+            console.print("[red]Cannot read strategy source for parallel sweep.[/red]")
+            raise typer.Exit(1)
+
+        par_results = run_sweep_parallel(
+            strategy_source=source,
+            param_grid=sweep_section,
+            data=data,
+            max_workers=parallel,
+            fast=fast,
+        )
+
+        # Print top results
+        table = Table(title=f"Parallel Sweep Results (ranked by {metric})")
+        table.add_column("Rank", justify="right")
+        table.add_column(metric, justify="right")
+        table.add_column("Params")
+        for i, (params, metrics_d) in enumerate(par_results[:top_n], 1):
+            table.add_row(str(i), f"{metrics_d.get(metric, 0.0):.2f}", json.dumps(params))
+        console.print(table)
+
+        if artifacts_dir:
+            export_sweep_winners(source, par_results, artifacts_dir / "sweep_winners", top_n=3)
+    else:
+        results = run_sweep(cfg, fast=fast, artifacts_dir=artifacts_dir)
+        ranked = sorted(results, key=lambda r: r.metrics.get(metric, 0.0), reverse=True)
+        _print_sweep_results(ranked[:top_n], metric)
 
 
 @app.command()

@@ -1,4 +1,4 @@
-"""Prompt template for strategy ideation — give data, let the thinkers think."""
+"""Prompt template for strategy ideation — platform-proven results prioritized."""
 
 from __future__ import annotations
 
@@ -37,43 +37,95 @@ def build_ideation_prompt(
     best_strategy_card: dict[str, Any] | None = None,
     platform_summary: str = "",
 ) -> tuple[str, list[dict[str, str]]]:
-    """Build the ideation prompt with rich per-product data and param history."""
+    """Build the ideation prompt. Platform-proven results come first."""
     playbook = _load_playbook()
 
-    # Strategy code examples
     examples_text = ""
     for name, code in strategy_examples.items():
         examples_text += f"\n--- {name}.py ---\n{code}\n"
 
-    # Results so far — with per-product and params
-    results_text = ""
-    if top_strategies:
-        results_text = "\n## Previous results (ranked by PnL)\n"
-        for i, card in enumerate(top_strategies[:8], 1):
-            status = " <<<< CURRENT BEST" if card.get("status") == "best" else ""
-            sharpe = card.get("sharpe", 0)
-            fills = card.get("total_fills", 0)
+    # === SECTION 1: Platform-proven strategies (TOP PRIORITY) ===
+    proven_text = ""
+    proven = [c for c in top_strategies if c.get("strengths", "").startswith("PLATFORM PROVEN")]
+    if proven:
+        proven_text = "\n## PLATFORM-PROVEN strategies (these ACTUALLY work)\n"
+        for i, card in enumerate(proven[:4], 1):
+            platform_pnl = ""
             strengths = card.get("strengths", "")
-            results_text += (
-                f"{i}. {card.get('name', '?')} ({card.get('source_model', '?')}) "
-                f"— PnL={card.get('pnl', 0):.0f} [sharpe={sharpe:.1f}, fills={fills:.0f}]{status}\n"
+            if "PLATFORM PROVEN" in strengths:
+                platform_pnl = strengths.split("PLATFORM PROVEN")[1].split(".")[0].strip()
+            proven_text += (
+                f"{i}. **{card.get('name', '?')}** — Backtest={card.get('pnl', 0):.0f}, "
+                f"Platform={platform_pnl}\n"
             )
             # Per-product breakdown
             pp = card.get("per_product", {})
             if pp:
                 for prod, pm in sorted(pp.items()):
                     fc = pm.get("fill_count", 0)
-                    vol = pm.get("total_volume", 0)
-                    results_text += f"   {prod}: {fc:.0f} fills, vol={vol:.0f}\n"
-            # Params
+                    proven_text += f"   {prod}: {fc:.0f} fills\n"
             params = card.get("params", {})
             if params:
                 param_str = ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
-                results_text += f"   Params: {param_str}\n"
-            if strengths:
-                results_text += f"   Strengths: {strengths}\n"
+                proven_text += f"   Params: {param_str}\n"
+            proven_text += f"   {card.get('description', '')[:150]}\n"
 
-    # Parameter history — what values have been tried and their PnL
+    # === Per-asset best results ===
+    asset_text = ""
+    all_with_pp = [c for c in top_strategies if c.get("per_product")]
+    if all_with_pp:
+        asset_best: dict[str, tuple[str, float, float]] = {}  # prod -> (strat_name, fills, pnl)
+        for card in all_with_pp:
+            for prod, pm in card.get("per_product", {}).items():
+                fc = pm.get("fill_count", 0)
+                key = prod
+                if key not in asset_best or fc > asset_best[key][1]:
+                    asset_best[key] = (card.get("name", "?"), fc, card.get("pnl", 0))
+        if asset_best:
+            asset_text = "\n## Per-asset performance (best by fill count)\n"
+            for prod, (name, fills, pnl) in sorted(asset_best.items()):
+                asset_text += (
+                    f"- **{prod}**: best is {name} ({fills:.0f} fills, total PnL={pnl:.0f})\n"
+                )
+            asset_text += (
+                "\nNOTE: Total PnL = sum of per-asset PnL. Improving one asset improves the total. "
+                "Consider which asset has the most room for improvement.\n"
+            )
+
+    # === SECTION 2: Best strategy code ===
+    best_code_text = ""
+    if best_strategy_code and best_strategy_card:
+        best_pnl = best_strategy_card.get("pnl", 0)
+        best_code_text = (
+            f"\n## Best strategy code (beat this)\n"
+            f"Backtest PnL={best_pnl:.0f}\n"
+            f"```python\n{best_strategy_code}\n```\n"
+        )
+
+    # === SECTION 3: All tried strategies (brief summary) ===
+    tried_text = ""
+    non_proven = [
+        c for c in top_strategies if not c.get("strengths", "").startswith("PLATFORM PROVEN")
+    ]
+    if non_proven:
+        tried_text = "\n## Other strategies tried (backtest only, not platform-tested)\n"
+        for card in non_proven[:6]:
+            params = card.get("params", {})
+            param_str = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
+            tried_text += f"- {card.get('name', '?')}: PnL={card.get('pnl', 0):.0f}"
+            if param_str:
+                tried_text += f" [{param_str}]"
+            tried_text += "\n"
+
+    # === SECTION 4: Failed strategies ===
+    fail_text = ""
+    if failed_strategies:
+        fail_text = "\n## FAILED strategies (don't repeat these)\n"
+        for card in failed_strategies[:5]:
+            reason = card.get("failure_reason", "unknown")
+            fail_text += f"- {card.get('name', '?')} — PnL={card.get('pnl', 0):.0f} [{reason}]\n"
+
+    # === SECTION 5: Parameter history ===
     param_history_text = ""
     all_cards = [*top_strategies, *failed_strategies]
     param_values: dict[str, list[tuple[Any, float]]] = {}
@@ -82,74 +134,51 @@ def build_ideation_prompt(
         for k, v in card.get("params", {}).items():
             param_values.setdefault(k, []).append((v, card_pnl))
     if param_values:
-        param_history_text = "\n## Parameter history (explored ranges)\n"
+        param_history_text = "\n## Parameter history\n"
         for param, vals in sorted(param_values.items()):
-            unique = sorted(set(vals), key=lambda x: x[1], reverse=True)[:6]
+            unique = sorted(set(vals), key=lambda x: x[1], reverse=True)[:5]
             entries = [f"{v}→{pnl:.0f}" for v, pnl in unique]
-            best_v, best_pnl = unique[0]
-            param_history_text += f"- **{param}**: {', '.join(entries)} [peak: {best_v}]\n"
+            param_history_text += f"- {param}: {', '.join(entries)}\n"
 
-    # Failed strategies with specific reasons
-    fail_text = ""
-    if failed_strategies:
-        fail_text = "\n## What failed (don't repeat these)\n"
-        for card in failed_strategies[:5]:
-            reason = card.get("failure_reason", "unknown")
-            fail_text += f"- {card.get('name', '?')} — PnL={card.get('pnl', 0):.0f} [{reason}]\n"
-
-    # Best strategy code
-    best_code_text = ""
-    if best_strategy_code and best_strategy_card:
-        best_pnl = best_strategy_card.get("pnl", 0)
-        best_code_text = (
-            f"\n## Best strategy so far (PnL={best_pnl:.0f}) — beat this\n"
-            f"```python\n{best_strategy_code}\n```\n"
-        )
-
-    # Knowledge
+    # === Knowledge ===
     knowledge_text = ""
     if mechanics_notes:
-        knowledge_text += f"\n## What we know about the platform\n{mechanics_notes[:4000]}\n"
+        knowledge_text += f"\n## Platform knowledge\n{mechanics_notes[:4000]}\n"
     if product_briefs:
-        knowledge_text += f"\n## What we know about the products\n{product_briefs[:4000]}\n"
+        knowledge_text += f"\n## Product behavior\n{product_briefs[:4000]}\n"
 
-    # Task
-    task = (
-        f"Round {round_num}. Propose exactly {num_candidates} strateg{'y' if num_candidates == 1 else 'ies'}. "
-        "Study the results above. Build on what scored high. Avoid what failed.\n\n"
-        "IMPORTANT RULES:\n"
-        "- Describe the ARCHITECTURE and LOGIC (what the strategy does, how it decides)\n"
-        "- Do NOT specify exact parameter values — Claude Opus will implement the code "
-        "and a parameter sweep will optimize the values automatically\n"
-        "- Say things like 'use EMA for fair value' NOT 'use EMA with alpha=0.15'\n"
-        "- Say 'aggressive inventory skew' NOT 'skew factor 0.75'\n"
-        "- Strategies that scored >5000 used architectural ideas, "
-        "strategies that scored <0 used over-specified parameters\n"
-        "- Be bold — the backtester is cheap, try things out"
-    )
-
-    # Platform feedback
+    # === Platform feedback ===
     platform_text = ""
     if platform_summary:
-        platform_text = (
-            f"\n## Real platform feedback (from previous submission — use for calibration)\n"
-            f"{platform_summary}\n"
-        )
+        platform_text = f"\n## Latest platform feedback\n{platform_summary}\n"
+
+    # === Task ===
+    task = (
+        f"Round {round_num}. Propose exactly {num_candidates} strateg{'y' if num_candidates == 1 else 'ies'}. "
+        "Study the PLATFORM-PROVEN results and per-asset breakdown above. "
+        "Total PnL = EMERALDS PnL + TOMATOES PnL. Improving either asset improves the total. "
+        "Look at which asset has the most room for improvement. "
+        "The backtester overestimates ~6x but the RANKING is mostly correct. "
+        "Describe ARCHITECTURE and LOGIC, not specific parameter values. "
+        "Be bold — try things."
+    )
 
     user_msg = f"""## Objective
 {objective}
 
 {knowledge_text}
-{results_text}
+{proven_text}
+{asset_text}
+{best_code_text}
+{tried_text}
 {param_history_text}
 {fail_text}
-{best_code_text}
 {platform_text}
 
 ## Reference implementations
 {examples_text}
 
-## Strategy patterns from past competitions (different products — adapt concepts only)
+## Strategy patterns (from past competitions — adapt concepts only)
 {playbook}
 
 ## Task
@@ -160,9 +189,9 @@ Output a JSON object:
   "candidates": [
     {{
       "name": "short_snake_case_name",
-      "description": "ARCHITECTURAL description: what the strategy does, how it manages inventory, what signals it uses. Do NOT include specific parameter values.",
+      "description": "ARCHITECTURAL description of what the strategy does",
       "base_strategy": "market_maker or fair_value or inventory_mm",
-      "modifications": "describe the LOGIC changes, not parameter values. Claude will code it."
+      "modifications": "describe LOGIC changes, not parameter values"
     }}
   ]
 }}"""

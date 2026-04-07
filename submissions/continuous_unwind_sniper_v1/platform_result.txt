@@ -1,0 +1,14 @@
+Strategy: continuous_unwind_sniper_v1 (Gemini R2 + sweep unwind=60)
+Date submitted: 2026-04-06
+
+Local backtest (10K ticks, jmerle matching):
+  PnL: 16116
+  Expected platform PnL: ~2600 (6.2x ratio)
+
+Calibration:
+  market_maker: 5446 → 970 (5.6x)
+  microprice_sniper: 15503 → 2517 (6.2x)
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:

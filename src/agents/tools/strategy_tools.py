@@ -99,6 +99,96 @@ def extract_params(code: str) -> dict[str, Any]:
     return params
 
 
+def extract_module_constants(code: str) -> dict[str, int | float]:
+    """Extract module-level numeric constant assignments.
+
+    Parses patterns like: ``BASE_SIZE = 15`` or ``EMA_ALPHA = 0.15``.
+    Only matches UPPER_SNAKE_CASE names with numeric values.
+    """
+    constants: dict[str, int | float] = {}
+    for match in re.finditer(
+        r"^([A-Z][A-Z0-9_]*)\s*=\s*(-?(?:\d+\.\d*|\.\d+|\d+))\s*$",
+        code,
+        re.MULTILINE,
+    ):
+        name = match.group(1)
+        val_str = match.group(2)
+        constants[name] = float(val_str) if "." in val_str else int(val_str)
+    return constants
+
+
+def extract_all_params(code: str) -> dict[str, int | float]:
+    """Extract parameters from both ``p.get()`` and module constant patterns.
+
+    Returns a combined dict of ``{param_name: default_value}``.
+    Numeric values only — string parameters are skipped.
+    """
+    result: dict[str, int | float] = {}
+    # p.get() params first
+    for key, val in extract_params(code).items():
+        if isinstance(val, int | float):
+            result[key] = val
+    # Module-level constants
+    result.update(extract_module_constants(code))
+    return result
+
+
+def generate_sweep_grid(
+    params: dict[str, int | float],
+    n_values: int = 3,
+) -> dict[str, list[int | float]]:
+    """Auto-generate a sweep grid from extracted parameter defaults.
+
+    For each parameter, produces *n_values* test points centered on the default:
+      - 3 values: ``[0.7 * default, default, 1.3 * default]``
+      - 5 values: ``[0.5 * default, 0.75 * default, default, 1.25 * default, 1.5 * default]``
+
+    Integer parameters produce integer grids. A zero default gets ``[-1, 0, 1]``.
+    """
+    multipliers: dict[int, list[float]] = {
+        3: [0.7, 1.0, 1.3],
+        5: [0.5, 0.75, 1.0, 1.25, 1.5],
+    }
+    mults = multipliers.get(n_values, multipliers[3])
+
+    grid: dict[str, list[int | float]] = {}
+    for name, default in params.items():
+        if default == 0:
+            vals: list[int | float] = [-1, 0, 1]
+        elif isinstance(default, int):
+            raw = sorted({max(1, round(default * m)) for m in mults})
+            vals = [int(v) for v in raw]
+        else:
+            vals = sorted({round(default * m, 4) for m in mults})
+        grid[name] = vals
+    return grid
+
+
+def apply_params_to_code(code: str, overrides: dict[str, int | float]) -> str:
+    """Apply parameter overrides to strategy source code.
+
+    Handles two patterns:
+      1. Module-level constants: ``BASE_SIZE = 15``
+      2. ``p.get()`` defaults: ``p.get("base_size", 15)``
+    """
+    result = code
+    for name, val in overrides.items():
+        # Try module-level constant replacement
+        result = re.sub(
+            rf"^({re.escape(name)})\s*=\s*\S+\s*$",
+            rf"\1 = {val}",
+            result,
+            flags=re.MULTILINE,
+        )
+        # Try p.get() replacement
+        result = re.sub(
+            rf'(p\.get\("{re.escape(name)}",\s*)[^)]+(\))',
+            rf"\g<1>{val}\2",
+            result,
+        )
+    return result
+
+
 def run_strategy_experiment(
     strategy_name: str,
     data: BacktestData,

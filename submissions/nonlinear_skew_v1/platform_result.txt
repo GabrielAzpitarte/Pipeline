@@ -1,0 +1,15 @@
+Strategy: nonlinear_skew_v1 (Gemini 3.1 Pro R4 + sweep)
+Date submitted: 2026-04-06
+Source: 10-round orchestrator with enriched memory cards
+Cost: $3.36
+
+Local backtest (10K ticks, jmerle matching):
+  PnL: 15897
+  Per-product: EMERALDS 207 fills, TOMATOES 397 fills
+  Params: ema_alpha=0.15, skew_power=2.0, skew_factor=0.5, base_size=15
+  Strengths: high fill rate, good inventory control, balanced across products
+  Expected platform PnL: ~2200-2500 (7x ratio)
+
+Platform result:
+  PnL: 1.8k
+  Notes:

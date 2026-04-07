@@ -1,0 +1,16 @@
+Strategy: microprice_sniper_v1 (Gemini 3.1 Pro Round 4)
+Date submitted: 2026-04-06
+Source: 5-round orchestrator with jmerle-compatible backtester
+
+Local backtest (10K ticks, jmerle matching, queue_penetration=1.0):
+  PnL: 15503
+  Expected platform PnL: ~2770 (5.6x ratio)
+
+Calibration points:
+  market_maker: 5446 → 970 (5.6x)
+  calibrated_pennying: 3751 → 2100 (1.8x)
+  vol_adaptive_dual_ema: 4191 → 900 (4.7x) [with queue_penetration=0.20, now removed]
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:

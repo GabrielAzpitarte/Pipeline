@@ -54,14 +54,16 @@ class TestGoldenMarketMaker:
         expected = GOLDEN["market_maker_both_sides"]
         data = _make_data(
             market_trades=[
-                TradeRow(1, 100, "bot_a", "bot_b", "AMETHYSTS", "SEASHELLS", 9998, 10),
-                TradeRow(1, 100, "bot_c", "bot_d", "AMETHYSTS", "SEASHELLS", 10002, 10),
+                # Trades must exceed queue (book has 10 at each level, so 15 overflows by 5)
+                TradeRow(1, 100, "bot_a", "bot_b", "AMETHYSTS", "SEASHELLS", 9998, 15),
+                TradeRow(1, 100, "bot_c", "bot_d", "AMETHYSTS", "SEASHELLS", 10002, 15),
             ]
         )
         config = SimConfig(
             strategy_name=expected["strategy"],
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
+            queue_penetration=1.0,
         )
         result = SimEngine(config).run(data)
 
@@ -86,6 +88,7 @@ class TestGoldenFairValue:
             strategy_name=expected["strategy"],
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
+            queue_penetration=1.0,
         )
         result = SimEngine(config).run(data)
 
@@ -102,14 +105,15 @@ class TestGoldenInventoryMM:
         expected = GOLDEN["inventory_mm_zero_pos"]
         data = _make_data(
             market_trades=[
-                TradeRow(1, 100, "bot_a", "bot_b", "AMETHYSTS", "SEASHELLS", 9998, 10),
-                TradeRow(1, 100, "bot_c", "bot_d", "AMETHYSTS", "SEASHELLS", 10002, 10),
+                TradeRow(1, 100, "bot_a", "bot_b", "AMETHYSTS", "SEASHELLS", 9998, 15),
+                TradeRow(1, 100, "bot_c", "bot_d", "AMETHYSTS", "SEASHELLS", 10002, 15),
             ]
         )
         config = SimConfig(
             strategy_name=expected["strategy"],
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
+            queue_penetration=1.0,
         )
         result = SimEngine(config).run(data)
 

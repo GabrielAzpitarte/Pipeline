@@ -1,0 +1,13 @@
+Strategy: calibrated_pennying_v1 (Gemini R1 + sweep ema_alpha=0.20)
+Date submitted: 2026-04-06
+Source: 2-round test with calibrated backtester (queue modeling + qp=0.20)
+Cost: $0.53
+
+Local backtest (10K ticks, queue position modeling):
+  PnL: 3751
+  Calibration: backtester is ~1.3x of platform (market_maker: 1266 vs 970)
+  Expected platform PnL: ~2900
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes: This tests whether the calibrated backtester is consistent

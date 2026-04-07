@@ -17,8 +17,11 @@ from agents.memory import AgentMemory
 from agents.prompts.ideation import build_ideation_prompt
 from agents.prompts.patching import build_patching_prompt
 from agents.tools.strategy_tools import (
+    apply_params_to_code,
     cleanup_strategy,
+    extract_all_params,
     extract_params,
+    generate_sweep_grid,
     load_strategy_module,
     parse_platform_log,
     register_strategy_import,
@@ -154,6 +157,7 @@ class Orchestrator:
         self.ideation_model = ideation_model
         self.worker_model = worker_model
         self._strategy_examples = self._load_strategy_examples()
+        self._swept_strategies: set[str] = set()
 
         # Anthropic client (always available)
         self.client = anthropic.Anthropic()
@@ -274,11 +278,14 @@ class Orchestrator:
         import time as _time
 
         effective_max = max(max_tokens, 16384)
+        models_to_try = ["gemini-3.1-pro-preview", "gemini-2.5-flash"]
 
-        for attempt in range(3):
+        for attempt in range(5):
+            # Fall back to 2.5-flash after 3 failed attempts with 3.1-pro
+            model_name = models_to_try[0] if attempt < 3 else models_to_try[1]
             try:
                 response = self._gemini_client.models.generate_content(
-                    model="gemini-3.1-pro-preview",
+                    model=model_name,
                     contents="\n\n".join(prompt_parts),
                     config=genai_types.GenerateContentConfig(
                         max_output_tokens=effective_max,
@@ -287,9 +294,16 @@ class Orchestrator:
                 )
             except Exception as api_err:
                 err_str = str(api_err)
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    _log.warning("Gemini 503, retrying in 5s (attempt %d)", attempt + 1)
-                    _time.sleep(5)
+                if "503" in err_str or "UNAVAILABLE" in err_str or "capacity" in err_str.lower():
+                    wait = 15 if attempt < 3 else 5  # longer wait for 3.1-pro, shorter for fallback
+                    _log.warning(
+                        "Gemini %s failed (attempt %d/5), retrying in %ds: %s",
+                        model_name,
+                        attempt + 1,
+                        wait,
+                        err_str[:100],
+                    )
+                    _time.sleep(wait)
                     continue
                 raise
             usage = response.usage_metadata
@@ -564,10 +578,13 @@ class Orchestrator:
             # Store strategy card immediately
             self.memory.add_strategy_card(self._build_strategy_card(cr, round_num))
 
-        # Prune code from cards outside top 3 to limit memory size
-        top3_names = {c["name"] for c in self.memory.top_strategies(3)}
+        # Auto-sweep any new strategy that enters top 5
+        self._maybe_sweep_new_top_strategies(results, round_num)
+
+        # Prune code from cards outside top 5 to limit memory size
+        top5_names = {c["name"] for c in self.memory.top_strategies(5)}
         for card in self.memory._cards:
-            if card.get("name") not in top3_names and "code" in card:
+            if card.get("name") not in top5_names and "code" in card:
                 del card["code"]
         self.memory._save_cards()
 
@@ -629,11 +646,15 @@ class Orchestrator:
             self.max_rounds,
         )
 
-        best_overall_code: str = ""
-        best_overall_name: str = ""
-        best_overall_pnl: float = float("-inf")
-
         rounds_completed = 0
+
+        # Sweep any existing top-5 cards that haven't been swept yet
+        for card in self.memory.top_strategies(5):
+            name = card.get("name", "")
+            code = card.get("code", "")
+            if code and name and name not in self._swept_strategies:
+                _log.info("Sweeping existing top card: %s", name)
+                self._auto_sweep(code, name, round_num=0)
 
         for round_num in range(1, self.max_rounds + 1):
             if self.budget.over_budget():
@@ -668,31 +689,32 @@ class Orchestrator:
                 }
             )
 
-            for r in summary.get("results", []):
-                pnl = (r.get("faithful_metrics") or {}).get("total_pnl", float("-inf"))
-                if pnl > best_overall_pnl and r.get("code"):
-                    best_overall_pnl = pnl
-                    best_overall_code = r["code"]
-                    best_overall_name = r["name"]
+        # Save top 1 overall strategy
+        top_cards = sorted(
+            [c for c in self.memory._cards if c.get("code") and c.get("pnl", 0) > 0],
+            key=lambda c: c.get("pnl", 0),
+            reverse=True,
+        )[:1]
 
-        # Parameter sweep on best strategy (no LLM needed, pure grid search)
-        if best_overall_code and best_overall_name:
-            _log.info("Running parameter sweep on best strategy: %s", best_overall_name)
-            sweep_pnl, sweep_code = self._parameter_sweep(best_overall_code, best_overall_name)
-            if sweep_pnl > best_overall_pnl:
-                _log.info("Sweep improved PnL: %.2f -> %.2f", best_overall_pnl, sweep_pnl)
-                best_overall_pnl = sweep_pnl
-                best_overall_code = sweep_code
+        for i, card in enumerate(top_cards, 1):
+            name = card.get("name", f"best_{i}")
+            code = card.get("code", "")
+            if code:
+                write_strategy_file(name, code, self.strategies_dir)
+                register_strategy_import(name, self.init_path)
+                _log.info("Saved #%d overall: %s (PnL=%.2f)", i, name, card.get("pnl", 0))
 
-        if best_overall_code and best_overall_name:
-            _log.info("Writing best strategy: %s (PnL=%.2f)", best_overall_name, best_overall_pnl)
-            write_strategy_file(best_overall_name, best_overall_code, self.strategies_dir)
-            register_strategy_import(best_overall_name, self.init_path)
+        # Assemble best per-asset strategy
+        assembled_name = self._assemble_best_per_asset()
+
+        best_name = top_cards[0]["name"] if top_cards else None
+        best_pnl = top_cards[0].get("pnl", 0.0) if top_cards else 0.0
 
         final: dict[str, Any] = {
             "rounds_completed": rounds_completed,
-            "best_strategy": best_overall_name or None,
-            "best_pnl": best_overall_pnl if best_overall_pnl > float("-inf") else 0.0,
+            "best_strategy": best_name,
+            "best_pnl": best_pnl,
+            "assembled_strategy": assembled_name,
             "total_cost_usd": self.budget.estimated_cost(),
             "total_input_tokens": self.budget.total_input_tokens,
             "total_output_tokens": self.budget.total_output_tokens,
@@ -701,59 +723,156 @@ class Orchestrator:
         _console.print_json(data=final)
         return final
 
-    def _parameter_sweep(self, code: str, name: str) -> tuple[float, str]:
-        """Try parameter variations on the best strategy. Returns (best_pnl, best_code)."""
-        import re
+    def _assemble_best_per_asset(self) -> str | None:
+        """Combine the best EMERALDS logic with best TOMATOES logic into one strategy."""
+        cards_with_pp = [
+            c
+            for c in self.memory._cards
+            if c.get("code") and c.get("per_product") and c.get("pnl", 0) > 0
+        ]
+        if not cards_with_pp:
+            return None
 
-        best_pnl = float("-inf")
-        best_code = code
+        # Find best card per product by fill count
+        best_per_product: dict[str, dict[str, Any]] = {}
+        for card in cards_with_pp:
+            for prod, pm in card.get("per_product", {}).items():
+                fc = pm.get("fill_count", 0)
+                if prod not in best_per_product or fc > best_per_product[prod].get("_fills", 0):
+                    best_per_product[prod] = {**card, "_fills": fc}
 
-        sweep_values: dict[str, list[float]] = {
-            "order_size": [8, 10, 12, 15, 18, 20],
-            "unwind_threshold": [40, 50, 60, 70],
-            "ema_alpha": [0.10, 0.15, 0.20, 0.25, 0.30],
-        }
+        if len(best_per_product) < 2:
+            return None
 
-        # Try each parameter independently (not full grid — too many combos)
-        for param, values in sweep_values.items():
-            for val in values:
-                # Replace the default value in p.get("param", DEFAULT)
-                new_code = re.sub(
-                    rf'(p\.get\("{param}",\s*)[^)]+(\))',
-                    rf"\g<1>{val}\2",
-                    code,
+        # Check if both products use the same strategy — if so, no assembly needed
+        names = [c.get("name") for c in best_per_product.values()]
+        if len(set(names)) == 1:
+            _log.info("Best per-asset is the same strategy for all products — no assembly needed")
+            return None
+
+        # Log what we're combining
+        for prod, card in sorted(best_per_product.items()):
+            _log.info(
+                "Best for %s: %s (fills=%d, total_pnl=%.0f)",
+                prod,
+                card.get("name", "?"),
+                card.get("_fills", 0),
+                card.get("pnl", 0),
+            )
+
+        # Generate combined code via Python combiner (LLM fallback)
+        em_card = best_per_product.get("EMERALDS", {})
+        tom_card = best_per_product.get("TOMATOES", {})
+        em_code = em_card.get("code", "")
+        tom_code = tom_card.get("code", "")
+
+        assembled_name = "assembled_best_per_asset"
+        combined_code = ""
+
+        if em_code and tom_code:
+            try:
+                from submission.combine import combine_best_per_product
+
+                output_path = self.artifacts_dir / "combined_strategy.py"
+                combine_best_per_product(
+                    emeralds_code=em_code,
+                    emeralds_params=em_card.get("params", {}),
+                    tomatoes_code=tom_code,
+                    tomatoes_params=tom_card.get("params", {}),
+                    output_path=output_path,
                 )
+                combined_code = output_path.read_text()
+                _log.info("Combined strategy generated at %s", output_path)
+            except Exception:
+                _log.exception("Failed to generate combined strategy")
 
-                if new_code == code:
-                    continue
+        self.memory.add_strategy_card(
+            {
+                "name": assembled_name,
+                "source_model": "assembler",
+                "description": "ASSEMBLED: Best per-asset combination. "
+                + ", ".join(
+                    f"{p}: {c.get('name', '?')}" for p, c in sorted(best_per_product.items())
+                ),
+                "pnl": 0,  # unknown until tested
+                "round": 0,
+                "params": {},
+                "per_product": {},
+                "strengths": "Per-asset cherry-pick. Test on platform to verify.",
+                "status": "tested",
+                "error": None,
+                "products": sorted(best_per_product.keys()),
+                "failure_reason": "",
+                "code": combined_code if combined_code else None,
+            }
+        )
 
-                # Clean name for the sweep variant
-                clean_val = str(val).replace(".", "p")
-                sweep_name = f"psweep_{param}_{clean_val}"
-                # Replace register decorator to match sweep name
-                new_code = re.sub(
-                    r'@register\("[^"]+"\)',
-                    f'@register("{sweep_name}")',
-                    new_code,
-                )
-                try:
-                    write_strategy_file(sweep_name, new_code, self.strategies_dir)
-                    register_strategy_import(sweep_name, self.init_path)
-                    load_strategy_module(sweep_name)
-                    metrics = run_strategy_experiment(
-                        sweep_name, self.data, fast=False, artifacts_dir=self.artifacts_dir
-                    )
-                    pnl = metrics.get("total_pnl", 0.0)
-                    _log.info("Sweep %s=%s: PnL=%.2f", param, val, pnl)
-                    if pnl > best_pnl:
-                        best_pnl = pnl
-                        best_code = new_code
-                except Exception as exc:
-                    _log.warning("Sweep %s=%s failed: %s", param, val, exc)
-                finally:
-                    cleanup_strategy(sweep_name, self.strategies_dir, self.init_path)
+        _log.info("Assembled strategy card created: %s", assembled_name)
+        return assembled_name
 
-        return best_pnl, best_code
+    def _maybe_sweep_new_top_strategies(
+        self, results: list[CandidateResult], round_num: int
+    ) -> None:
+        """If any result enters top 5 cards, run a full parallel grid sweep."""
+        top5_names = {c["name"] for c in self.memory.top_strategies(5)}
+        for cr in results:
+            if (
+                cr.name in top5_names
+                and cr.code
+                and not cr.error
+                and cr.name not in self._swept_strategies
+            ):
+                self._auto_sweep(cr.code, cr.name, round_num)
+
+    def _auto_sweep(self, code: str, name: str, round_num: int) -> None:
+        """Full parallel grid sweep on a strategy. Adds top 3 results as new cards."""
+        from experiments.sweep_runner import run_sweep_parallel
+
+        params = extract_all_params(code)
+        if not params:
+            _log.info("No extractable params for %s, skipping sweep", name)
+            return
+
+        grid = generate_sweep_grid(params, n_values=3)
+        combos_count = 1
+        for vals in grid.values():
+            combos_count *= len(vals)
+        _log.info("Auto-sweeping %s: %d params, %d combos", name, len(grid), combos_count)
+
+        sweep_results = run_sweep_parallel(
+            strategy_source=code,
+            param_grid=grid,
+            data=self.data,
+            max_workers=12,
+        )
+
+        self._swept_strategies.add(name)
+
+        # Add top 3 sweep results as new strategy cards
+        for rank, (sweep_params, metrics) in enumerate(sweep_results[:3], 1):
+            sweep_name = f"{name}_sweep_r{round_num}_{rank}"
+            sweep_code = apply_params_to_code(code, sweep_params)
+            pnl = metrics.get("total_pnl", 0.0)
+            self.memory.add_strategy_card(
+                {
+                    "name": sweep_name,
+                    "source_model": "sweep",
+                    "description": f"Sweep rank {rank} of {name} (round {round_num})",
+                    "pnl": pnl,
+                    "round": round_num,
+                    "params": sweep_params,
+                    "per_product": {},
+                    "strengths": f"Grid sweep winner #{rank}. Params: {sweep_params}",
+                    "status": "tested",
+                    "code": sweep_code,
+                }
+            )
+            _log.info(
+                "Sweep card added: %s (PnL=%.2f, params=%s)",
+                sweep_name,
+                pnl,
+                sweep_params,
+            )
 
 
 # ---------------------------------------------------------------------------

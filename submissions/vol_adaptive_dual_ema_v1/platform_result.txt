@@ -1,0 +1,16 @@
+Strategy: vol_adaptive_dual_ema_v1 (o4-mini Round 5)
+Date submitted: 2026-04-06
+Source: 5-round orchestrator with calibrated backtester, continuing memory
+Cost: $1.48
+
+Local backtest (10K ticks, queue modeling + qp=0.20):
+  PnL: 4191
+  Expected platform PnL: ~2300 (1.8x ratio)
+
+Previous calibration:
+  market_maker: 1266 backtest → 970 platform (1.3x)
+  calibrated_pennying: 3751 backtest → 2100 platform (1.8x)
+
+Platform result:
+  PnL: [PASTE HERE]
+  Notes:
