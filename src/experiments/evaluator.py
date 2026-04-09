@@ -129,20 +129,48 @@ def evaluate_candidate(
     for scenario in scenarios:
         scenario_metrics: list[dict[str, float]] = []
         for data in datasets:
-            task = (0, params, modified_source, data, False, scenario.passive_fill_rate)
+            task = (
+                0,
+                params,
+                modified_source,
+                data,
+                False,
+                scenario.passive_fill_rate,
+                scenario.trade_match_mode,
+                scenario.queue_model,
+            )
             _, _, metrics = _sweep_worker(task)
             scenario_metrics.append(metrics)
         scenario_results[scenario.name] = scenario_metrics
 
-    # Compute multi-scale from baseline results
+    # Compute multi-scale from baseline results using REAL tick-level PnL paths
     baseline_metrics_list = scenario_results.get("baseline", [])
     cross_day_pnls = [m.get("total_pnl", 0.0) for m in baseline_metrics_list]
     avg_baseline_pnl = sum(cross_day_pnls) / len(cross_day_pnls) if cross_day_pnls else 0.0
 
-    # Block-level metrics (approximate from per-dataset PnLs)
-    multi_scale = compute_multi_scale(cross_day_pnls, block_size=1)
+    # True block evaluation from tick-level PnL paths
+    block_results: list[MultiScaleMetrics] = []
+    for m in baseline_metrics_list:
+        pnl_path = m.get("pnl_path", [])
+        if pnl_path and len(pnl_path) > 100:
+            block_results.append(compute_multi_scale(pnl_path, block_size=block_size))
+
+    if block_results:
+        # Aggregate: average block metrics across datasets
+        multi_scale = MultiScaleMetrics(
+            full_pnl=avg_baseline_pnl,
+            block_pnls=[bp for br in block_results for bp in br.block_pnls],
+            median_block_pnl=sum(br.median_block_pnl for br in block_results) / len(block_results),
+            min_block_pnl=min(br.min_block_pnl for br in block_results),
+            lower_quantile_pnl=min(br.lower_quantile_pnl for br in block_results),
+            positive_block_rate=sum(br.positive_block_rate for br in block_results)
+            / len(block_results),
+            block_pnl_std=max(br.block_pnl_std for br in block_results),
+        )
+    else:
+        multi_scale = compute_multi_scale(cross_day_pnls, block_size=1)
+        multi_scale.full_pnl = avg_baseline_pnl
     add_cross_day_info(multi_scale, cross_day_pnls)
-    multi_scale.full_pnl = avg_baseline_pnl
 
     # Fill diagnostics from baseline (average across datasets, skip non-numeric)
     avg_metrics: dict[str, float] = {}
@@ -288,42 +316,72 @@ def _assign_verdict(
     diagnostics: FillDiagnostics,
     multi_scale: MultiScaleMetrics,
 ) -> tuple[str, list[str]]:
-    """Assign a verdict and fragility notes based on evaluation metrics."""
+    """Assign a nuanced verdict with specific fragility classification.
+
+    Verdicts:
+        robust: performs well across all scenarios and blocks
+        promising: good overall but uncertain in some conditions
+        queue_fragile: breaks under queue-hostile scenario
+        passive_fragile: depends heavily on passive fills
+        inventory_fragile: hits position limits frequently
+        simulator_artifact: much worse under all stress scenarios
+        reject: negative PnL or fundamental issues
+    """
     notes: list[str] = []
 
     baseline = scenario_pnls.get("baseline", 0.0)
-    conservative = scenario_pnls.get("conservative", baseline)
+    queue_hostile = scenario_pnls.get("queue_hostile", baseline)
+    passive_hostile = scenario_pnls.get("passive_hostile", baseline)
+    taker_favorable = scenario_pnls.get("taker_favorable", baseline)
 
-    # Scenario gap
-    if baseline > 0:
-        gap = (baseline - conservative) / baseline
-        if gap > 0.40:
-            notes.append(f"high scenario gap ({gap:.0%})")
-        elif gap > 0.25:
-            notes.append(f"moderate scenario gap ({gap:.0%})")
-
-    # Passive dependency
-    if diagnostics.passive_fill_share > 0.70:
-        notes.append(f"high passive fill dependency ({diagnostics.passive_fill_share:.0%})")
-    elif diagnostics.passive_fill_share > 0.50:
-        notes.append(f"moderate passive dependency ({diagnostics.passive_fill_share:.0%})")
-
-    # Cross-day consistency
-    if multi_scale.cross_day_consistency < 0.80:
-        notes.append(f"low cross-day consistency ({multi_scale.cross_day_consistency:.2f})")
-
-    # Inventory
-    if diagnostics.max_inventory >= 70:
-        notes.append(f"high max inventory ({diagnostics.max_inventory})")
-
-    # Assign verdict
+    # Reject
     if baseline <= 0:
         return "reject", ["negative PnL", *notes]
-    if any("high" in n for n in notes):
-        return "fragile", notes
-    if any("moderate" in n for n in notes):
-        return "moderate", notes
-    return "strong", notes
+
+    # Queue fragility
+    if baseline > 0 and queue_hostile < baseline * 0.5:
+        notes.append(f"queue fragile: queue_hostile={queue_hostile:.0f} vs baseline={baseline:.0f}")
+
+    # Passive fragility
+    if baseline > 0 and passive_hostile < baseline * 0.3:
+        notes.append(
+            f"passive fragile: passive_hostile={passive_hostile:.0f} vs baseline={baseline:.0f}"
+        )
+
+    # Passive dependency (fill share)
+    if diagnostics.passive_fill_share > 0.85:
+        notes.append(f"high passive dependency ({diagnostics.passive_fill_share:.0%})")
+
+    # Inventory fragility
+    if diagnostics.max_inventory >= 70:
+        notes.append(f"inventory fragile: max={diagnostics.max_inventory}")
+
+    # Adverse fills
+    if diagnostics.adverse_rate_5 > 0.6:
+        notes.append(f"high adverse fill rate ({diagnostics.adverse_rate_5:.0%})")
+
+    # Cross-day consistency
+    if multi_scale.cross_day_consistency < 0.70:
+        notes.append(f"low cross-day consistency ({multi_scale.cross_day_consistency:.2f})")
+
+    # Simulator artifact: much worse under ALL stress scenarios
+    stress_pnls = [queue_hostile, passive_hostile, taker_favorable]
+    if all(sp < baseline * 0.4 for sp in stress_pnls) and baseline > 0:
+        return "simulator_artifact", [
+            f"all stress scenarios <40% of baseline ({baseline:.0f})",
+            *notes,
+        ]
+
+    # Classify by primary fragility
+    if any("queue fragile" in n for n in notes):
+        return "queue_fragile", notes
+    if any("passive fragile" in n for n in notes):
+        return "passive_fragile", notes
+    if any("inventory fragile" in n for n in notes):
+        return "inventory_fragile", notes
+    if notes:
+        return "promising", notes
+    return "robust", notes
 
 
 def evaluate_candidates(
@@ -474,10 +532,108 @@ def print_comparison_report(report: ComparisonReport) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Random variant generation
+# Structured variant generation (3-lane search)
 # ---------------------------------------------------------------------------
 
 
+def generate_structured_variants(
+    strategy_source: str,
+    base_params: dict[str, Any],
+    n_per_lane: int = 2,
+    seed: int = 42,
+) -> list[tuple[str, dict[str, Any], str]]:
+    """Generate variants across three search lanes.
+
+    Lanes:
+        exploit: Small ±5% perturbations — refine the current best.
+        orthogonal: Change ONE parameter dramatically (2x or 0.5x).
+        mutation: Extreme boundary values — test limits of the strategy.
+
+    Returns:
+        List of (variant_name, params, lane) tuples.
+    """
+    variants: list[tuple[str, dict[str, Any], str]] = []
+
+    exploit = _exploit_variants(base_params, n=n_per_lane, seed=seed)
+    variants.extend((f"exploit_{i}", p, "exploit") for i, p in enumerate(exploit, 1))
+
+    ortho = _orthogonal_variants(base_params, n=n_per_lane, seed=seed)
+    variants.extend((f"ortho_{i}", p, "orthogonal") for i, p in enumerate(ortho, 1))
+
+    mutation = _mutation_variants(base_params, n=n_per_lane, seed=seed)
+    variants.extend((f"mutant_{i}", p, "mutation") for i, p in enumerate(mutation, 1))
+
+    return variants
+
+
+def _exploit_variants(params: dict[str, Any], n: int = 2, seed: int = 42) -> list[dict[str, Any]]:
+    """Small perturbations (±5%) — refine the current best."""
+    rng = random.Random(seed)
+    variants: list[dict[str, Any]] = []
+    for _ in range(n):
+        new_params: dict[str, Any] = {}
+        for key, val in params.items():
+            if isinstance(val, int):
+                delta = max(1, int(val * 0.05))
+                new_params[key] = max(1, val + rng.randint(-delta, delta))
+            elif isinstance(val, float):
+                delta = val * 0.05
+                new_params[key] = round(max(0.01, val + rng.uniform(-delta, delta)), 4)
+            else:
+                new_params[key] = val
+        variants.append(new_params)
+    return variants
+
+
+def _orthogonal_variants(
+    params: dict[str, Any], n: int = 2, seed: int = 42
+) -> list[dict[str, Any]]:
+    """Change ONE parameter dramatically (2x or 0.5x) while keeping others fixed."""
+    rng = random.Random(seed + 100)
+    variants: list[dict[str, Any]] = []
+    numeric_keys = [k for k, v in params.items() if isinstance(v, int | float)]
+
+    if not numeric_keys:
+        return variants
+
+    selected = rng.sample(numeric_keys, min(n, len(numeric_keys)))
+    for key in selected:
+        new_params = dict(params)
+        val = params[key]
+        new_val = val * 2 if rng.random() > 0.5 else val * 0.5
+        if isinstance(val, int):
+            new_params[key] = max(1, round(new_val))
+        else:
+            new_params[key] = round(max(0.01, new_val), 4)
+        variants.append(new_params)
+
+    return variants
+
+
+def _mutation_variants(params: dict[str, Any], n: int = 2, seed: int = 42) -> list[dict[str, Any]]:
+    """Extreme boundary values — test limits of the strategy."""
+    rng = random.Random(seed + 200)
+    variants: list[dict[str, Any]] = []
+    numeric_keys = [k for k, v in params.items() if isinstance(v, int | float)]
+
+    if not numeric_keys:
+        return variants
+
+    selected = rng.sample(numeric_keys, min(n, len(numeric_keys)))
+    for key in selected:
+        new_params = dict(params)
+        val = params[key]
+        new_val = val * 3 if rng.random() > 0.5 else val * 0.2
+        if isinstance(val, int):
+            new_params[key] = max(1, round(new_val))
+        else:
+            new_params[key] = round(max(0.01, new_val), 4)
+        variants.append(new_params)
+
+    return variants
+
+
+# Keep backward compatibility
 def generate_random_variants(
     strategy_source: str,
     base_params: dict[str, Any],
@@ -485,17 +641,9 @@ def generate_random_variants(
     perturbation: float = 0.15,
     seed: int = 42,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Generate random parameter variants around the base.
-
-    Each numeric param is perturbed by ±perturbation fraction.
-    Integer params stay as integers.
-
-    Returns:
-        List of (variant_name, params) tuples.
-    """
+    """Legacy wrapper — use generate_structured_variants() for new code."""
     rng = random.Random(seed)
     variants: list[tuple[str, dict[str, Any]]] = []
-
     for i in range(n_variants):
         new_params: dict[str, Any] = {}
         for key, val in base_params.items():
@@ -509,7 +657,6 @@ def generate_random_variants(
             else:
                 new_params[key] = val
         variants.append((f"variant_{i + 1}", new_params))
-
     return variants
 
 

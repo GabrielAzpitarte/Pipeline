@@ -203,17 +203,29 @@ class Orchestrator:
         except Exception:
             _log.warning("Could not load day_-2 data for cross-day evaluation")
 
-        # Compute asset intelligence briefing for strategists
+        # Run full market onboarding (intel + profiles + opportunity allocation)
+        self._onboarding = None
+        self._asset_briefing = ""
+        self._effort_allocation: dict[str, float] = {}
         try:
-            from agents.prompts.asset_briefing import generate_full_briefing
-            from analytics.market_intel import compute_all_intelligence
+            from analytics.onboarding import onboard_new_round
 
-            all_intel = compute_all_intelligence(self._eval_datasets)
-            self._asset_briefing = generate_full_briefing(all_intel)
-            _log.info("Asset intelligence briefing generated (%d chars)", len(self._asset_briefing))
+            self._onboarding = onboard_new_round(self._eval_datasets)
+            self._asset_briefing = self._onboarding.briefing
+            self._effort_allocation = self._onboarding.effort_allocation
+            for sym, profile in self._onboarding.profiles.items():
+                _log.info(
+                    "Asset %s: regime=%s, maker=%s, taker=%s, opportunity=%.2f, effort=%.0f%%",
+                    sym,
+                    profile.regime,
+                    profile.maker_viability,
+                    profile.taker_viability,
+                    self._onboarding.opportunities[sym].score,
+                    self._effort_allocation.get(sym, 0) * 100,
+                )
         except Exception:
             self._asset_briefing = ""
-            _log.warning("Could not generate asset intelligence briefing")
+            _log.warning("Could not run market onboarding")
 
         # Anthropic client (always available)
         self.client = anthropic.Anthropic()
@@ -426,34 +438,29 @@ class Orchestrator:
     def _ideate(self, round_num: int) -> list[dict[str, Any]]:
         """Propose candidates: Gemini 3.1 Pro (1 idea) + GPT-5.4 (1 idea)."""
         candidates: list[dict[str, Any]] = []
-        top = self.memory.top_strategies(10)
-        failed = self.memory.failed_strategies(5)
         mechanics = self.memory.load_knowledge_file("mechanics.md")
-        # Use computed asset intelligence briefing instead of static product_briefs.md
         products = self._asset_briefing or self.memory.load_knowledge_file("product_briefs.md")
-
-        best_card = self.memory.best_strategy_card()
-        best_code = best_card.get("code", "") if best_card else ""
-
-        # Load latest platform log summary if available
+        evidence = self.memory.evidence_pack()
+        family_dist = self.memory.family_distribution()
         platform_summary = self._load_platform_summary()
+
+        # Build ideation prompt once (shared across models)
+        system, messages = build_ideation_prompt(
+            self.objective,
+            self._strategy_examples,
+            evidence,
+            mechanics,
+            products,
+            1,
+            round_num,
+            family_dist,
+            platform_summary,
+            self._effort_allocation,
+        )
 
         # Gemini ideation — 1 candidate
         if self._gemini_client is not None:
             try:
-                system, messages = build_ideation_prompt(
-                    self.objective,
-                    self._strategy_examples,
-                    top,
-                    failed,
-                    mechanics,
-                    products,
-                    1,
-                    round_num,
-                    best_code,
-                    best_card,
-                    platform_summary,
-                )
                 result = self._call_gemini(messages, system=system)
                 for c in result.get("candidates", [])[:1]:
                     c["source_model"] = "gemini"
@@ -465,24 +472,12 @@ class Orchestrator:
         # OpenAI GPT-5.4 ideation — 1 candidate
         if self._openai_client is not None:
             try:
-                system, messages = build_ideation_prompt(
-                    self.objective,
-                    self._strategy_examples,
-                    top,
-                    failed,
-                    mechanics,
-                    products,
-                    1,
-                    round_num,
-                    best_code,
-                    best_card,
-                    platform_summary,
-                )
                 result = self._call_openai(messages, system=system)
                 for c in result.get("candidates", [])[:1]:
                     c["source_model"] = "openai"
                     candidates.append(c)
-                _log.info("OpenAI proposed: %s", candidates[-1]["name"])
+                if candidates:
+                    _log.info("OpenAI proposed: %s", candidates[-1]["name"])
             except Exception as exc:
                 _log.warning("OpenAI ideation failed: %s", exc)
 
@@ -533,6 +528,37 @@ class Orchestrator:
 
         return code, {}
 
+    @staticmethod
+    def _classify_architecture(cr: CandidateResult) -> str:
+        """Classify a candidate's architecture family."""
+        from agents.taxonomy import classify_strategy
+
+        return classify_strategy(cr.code or "", cr.description)
+
+    def _refresh_opportunity(self) -> None:
+        """Recompute opportunity allocation from latest per-asset evidence."""
+        if not self._onboarding:
+            return
+        from analytics.onboarding import allocate_effort, compute_opportunity
+
+        best_per_asset: dict[str, float] = {}
+        for card in self.memory._cards:
+            for sym, ae in card.get("by_symbol", {}).items():
+                pnl = ae.get("raw_pnl", 0) if isinstance(ae, dict) else 0
+                best_per_asset[sym] = max(best_per_asset.get(sym, 0), pnl)
+
+        for sym in self._onboarding.profiles:
+            self._onboarding.opportunities[sym] = compute_opportunity(
+                self._onboarding.profiles[sym],
+                self._onboarding.intel[sym],
+                best_per_asset.get(sym, 0),
+            )
+        self._effort_allocation = allocate_effort(self._onboarding.opportunities)
+        _log.info(
+            "Opportunity refresh: %s",
+            {sym: f"{w:.0%}" for sym, w in self._effort_allocation.items()},
+        )
+
     def _evaluate_candidate(
         self,
         candidate: dict[str, Any],
@@ -553,6 +579,16 @@ class Orchestrator:
 
             code = code.replace(f'@register("{raw_name}")', f'@register("{name}")')
             cr.code = code
+
+            # Validate before writing to disk
+            from submission.checklist import validate_generated_code
+
+            validation_errors = validate_generated_code(code)
+            blockers = [e for e in validation_errors if not e.startswith("WARNING")]
+            if blockers:
+                cr.error = f"Validation failed: {'; '.join(blockers)}"
+                _log.warning("Code validation failed for %s: %s", name, blockers)
+                return cr
 
             write_strategy_file(name, code, self.strategies_dir)
             register_strategy_import(name, self.init_path)
@@ -684,6 +720,16 @@ class Orchestrator:
             "passive_fill_share": cr.passive_fill_share,
             "fragility_notes": cr.fragility_notes,
             "by_symbol": cr.by_symbol,
+            "created_at": datetime.now(tz=UTC).isoformat(),
+            "architecture_family": self._classify_architecture(cr),
+            "platform_tested": False,
+            "platform_pnl": None,
+            "deprecated": False,
+            "confidence": "low" if cr.transfer_score < 0.3 else "medium",
+            "parent_strategy": None,
+            "parent_round": None,
+            "change_type": "new",
+            "change_description": cr.description,
         }
 
         if not cr.error and pnl >= 0 and cr.code:
@@ -724,6 +770,9 @@ class Orchestrator:
 
         # Update product knowledge with round results
         self._update_knowledge(results, round_num)
+
+        # Refresh opportunity allocation based on latest evidence
+        self._refresh_opportunity()
 
         return {
             "results": [
@@ -830,11 +879,39 @@ class Orchestrator:
         best_name = top_cards[0]["name"] if top_cards else None
         best_pnl = top_cards[0].get("pnl", 0.0) if top_cards else 0.0
 
+        # Recommend strategies for platform testing
+        platform_recs: list[dict[str, Any]] = []
+        try:
+            from submission.policy import recommend_for_platform
+
+            calibration_path = self.artifacts_dir / "calibration_data.json"
+            recs = recommend_for_platform(self.memory, calibration_path, budget=3)
+            for rec in recs:
+                _log.info(
+                    "Platform recommendation: %s (predicted=%d, reason=%s, family=%s)",
+                    rec.strategy_name,
+                    rec.local_prediction,
+                    rec.submission_reason,
+                    rec.architecture_family,
+                )
+                platform_recs.append(
+                    {
+                        "name": rec.strategy_name,
+                        "prediction": rec.local_prediction,
+                        "confidence": rec.confidence,
+                        "reason": rec.submission_reason,
+                        "family": rec.architecture_family,
+                    }
+                )
+        except Exception:
+            _log.warning("Could not generate platform recommendations")
+
         final: dict[str, Any] = {
             "rounds_completed": rounds_completed,
             "best_strategy": best_name,
             "best_pnl": best_pnl,
             "assembled_strategy": assembled_name,
+            "platform_recommendations": platform_recs,
             "total_cost_usd": self.budget.estimated_cost(),
             "total_input_tokens": self.budget.total_input_tokens,
             "total_output_tokens": self.budget.total_output_tokens,
@@ -911,6 +988,46 @@ class Orchestrator:
             except Exception:
                 _log.exception("Failed to generate combined strategy")
 
+        # Validate assembled code
+        assembled_score = 0.0
+        assembled_verdict = "unknown"
+        assembly_justified = False
+        if combined_code:
+            from submission.checklist import validate_generated_code
+
+            errors = validate_generated_code(combined_code)
+            if errors:
+                _log.warning("Assembled strategy validation issues: %s", errors)
+
+            # Evaluate assembled strategy through full pipeline
+            try:
+                from experiments.evaluator import evaluate_candidate as deep_evaluate
+
+                ev = deep_evaluate(assembled_name, combined_code, {}, self._eval_datasets)
+                assembled_score = ev.transfer_score.score
+                assembled_verdict = ev.verdict
+                _log.info(
+                    "Assembled strategy: transfer=%.4f, verdict=%s",
+                    assembled_score,
+                    assembled_verdict,
+                )
+
+                # Only keep if >= 90% of best monolithic
+                best_mono = max(
+                    cards_with_pp,
+                    key=lambda c: c.get("transfer_score", 0),
+                )
+                mono_score = best_mono.get("transfer_score", 0)
+                assembly_justified = assembled_score >= mono_score * 0.9
+                if not assembly_justified:
+                    _log.info(
+                        "Assembled (%.4f) < 90%% of monolithic (%.4f) — not justified",
+                        assembled_score,
+                        mono_score,
+                    )
+            except Exception:
+                _log.exception("Failed to evaluate assembled strategy")
+
         self.memory.add_strategy_card(
             {
                 "name": assembled_name,
@@ -919,7 +1036,9 @@ class Orchestrator:
                 + ", ".join(
                     f"{p}: {c.get('name', '?')}" for p, c in sorted(best_per_product.items())
                 ),
-                "pnl": 0,  # unknown until tested
+                "pnl": 0,
+                "transfer_score": assembled_score,
+                "verdict": assembled_verdict,
                 "round": 0,
                 "params": {},
                 "per_product": {},
@@ -927,16 +1046,26 @@ class Orchestrator:
                 "status": "tested",
                 "error": None,
                 "products": sorted(best_per_product.keys()),
-                "failure_reason": "",
+                "failure_reason": "" if assembly_justified else "worse than monolithic",
                 "code": combined_code if combined_code else None,
+                "assembly_diagnostics": {
+                    "emeralds_source": em_card.get("name"),
+                    "emeralds_score": em_card.get("_score", 0),
+                    "tomatoes_source": tom_card.get("name"),
+                    "tomatoes_score": tom_card.get("_score", 0),
+                    "assembled_score": assembled_score,
+                    "assembly_justified": assembly_justified,
+                },
             }
         )
 
-        _log.info("Assembled strategy card created: %s", assembled_name)
+        _log.info(
+            "Assembled strategy card created: %s (justified=%s)", assembled_name, assembly_justified
+        )
         return assembled_name
 
     def _evaluate_variants(self, results: list[CandidateResult], round_num: int) -> None:
-        """Generate and evaluate random variants of the best candidate from this round."""
+        """Generate and evaluate structured variants of the best candidate."""
         valid = [r for r in results if r.code and not r.error and r.transfer_score > 0]
         if not valid:
             return
@@ -948,12 +1077,16 @@ class Orchestrator:
             return
 
         from experiments.evaluator import evaluate_candidate as deep_evaluate
-        from experiments.evaluator import generate_random_variants
+        from experiments.evaluator import generate_structured_variants
 
-        variants = generate_random_variants(best.code, params, n_variants=3, seed=round_num)
-        _log.info("Evaluating %d random variants of %s", len(variants), best.name)
+        variants = generate_structured_variants(best.code, params, n_per_lane=2, seed=round_num)
+        _log.info(
+            "Evaluating %d structured variants of %s (exploit/orthogonal/mutation)",
+            len(variants),
+            best.name,
+        )
 
-        for vname, vparams in variants:
+        for vname, vparams, lane in variants:
             variant_name = f"{best.name}_{vname}"
             ev = deep_evaluate(
                 name=variant_name,
@@ -962,8 +1095,9 @@ class Orchestrator:
                 datasets=self._eval_datasets,
             )
             _log.info(
-                "Variant %s: transfer=%.4f, verdict=%s (vs best %.4f)",
+                "Variant %s [%s]: transfer=%.4f, verdict=%s (vs best %.4f)",
                 variant_name,
+                lane,
                 ev.transfer_score.score,
                 ev.verdict,
                 best.transfer_score,
@@ -989,6 +1123,10 @@ class Orchestrator:
                         ),
                         "passive_fill_share": ev.fill_diagnostics.passive_fill_share,
                         "fragility_notes": ev.fragility_notes,
+                        "parent_strategy": best.name,
+                        "parent_round": round_num,
+                        "change_type": lane,
+                        "change_description": f"{lane} variant: {vparams}",
                     }
                 )
 

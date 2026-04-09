@@ -81,6 +81,200 @@ def _build_order_depth(
     return od
 
 
+def run_simulation(
+    trader_callable: Any,
+    data: BacktestData,
+    trade_match_mode: TradeMatchingMode = TradeMatchingMode.ALL,
+    passive_fill_rate: float = 1.0,
+    queue_penetration: float = 1.0,
+    queue_model: str = "none",
+    data_split: float = 1.0,
+    risk_limits: RiskLimits | None = None,
+) -> SimResult:
+    """Core simulation loop — single source of execution truth.
+
+    This is the ONE authoritative simulation path. Both SimEngine and
+    sweep workers must call this function.
+
+    Args:
+        trader_callable: A trader instance with ``run(state)`` method.
+            Can be a registry Trader or a standalone Trader from exec().
+        data: Parsed backtest data.
+        trade_match_mode: How to match against market trades.
+        passive_fill_rate: Fraction of same-price passive fills granted.
+        queue_penetration: Scaling factor for trade liquidity.
+        data_split: Fraction of data to use (1.0 = all).
+        risk_limits: Optional risk limits for registry-style Trader.
+    """
+    pnl_tracker = PnLTracker()
+    result = SimResult()
+
+    positions: dict[str, int] = {}
+    own_trades: dict[str, list[Trade]] = {}
+    trader_data: str = ""
+    mid_prices: dict[str, float] = {}
+
+    timestamps = data.timestamps
+    if data_split < 1.0:
+        n = max(1, int(len(timestamps) * data_split))
+        timestamps = timestamps[:n]
+
+    _log.info("Starting sim: %d ticks", len(timestamps))
+
+    for timestamp in timestamps:
+        # 1. Build order depths and listings
+        order_depths: dict[str, OrderDepth] = {}
+        mid_prices = {}
+        listings: dict[str, Listing] = {}
+
+        for product, price_row in data.prices.get(timestamp, {}).items():
+            order_depths[product] = _build_order_depth(
+                price_row.bid_prices,
+                price_row.bid_volumes,
+                price_row.ask_prices,
+                price_row.ask_volumes,
+            )
+            mid_prices[product] = price_row.mid_price
+            listings[product] = Listing(product, product, "SEASHELLS")
+
+        # 2. Build market trades (split liquidity between sides)
+        raw_trades: dict[str, list[Trade]] = {}
+        market_trades_mt: dict[str, list[MarketTrade]] = {}
+        for product, trade_rows in data.trades.get(timestamp, {}).items():
+            trades_list: list[Trade] = []
+            mt_list: list[MarketTrade] = []
+            for tr in trade_rows:
+                t = Trade(
+                    symbol=tr.symbol,
+                    price=tr.price,
+                    quantity=tr.quantity,
+                    buyer=tr.buyer,
+                    seller=tr.seller,
+                    timestamp=tr.timestamp,
+                )
+                trades_list.append(t)
+                half_qty = max(1, tr.quantity // 2)
+                if queue_penetration < 1.0 and half_qty > 0:
+                    half_qty = max(1, round(half_qty * queue_penetration))
+                mt_list.append(MarketTrade(trade=t, buy_quantity=half_qty, sell_quantity=half_qty))
+            raw_trades[product] = trades_list
+            market_trades_mt[product] = mt_list
+
+        # 3. Build TradingState
+        state = TradingState(
+            timestamp=timestamp,
+            traderData=trader_data,
+            listings=listings,
+            order_depths=copy.deepcopy(order_depths),
+            own_trades=own_trades,
+            market_trades={
+                s: [
+                    Trade(t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp) for t in tl
+                ]
+                for s, tl in raw_trades.items()
+            },
+            position=dict(positions),
+            observations=Observation(),
+        )
+
+        # 4. Call trader
+        if risk_limits is not None and hasattr(trader_callable, "run"):
+            # Registry-style Trader with risk filtering
+            try:
+                raw_orders, _conversions, trader_data = trader_callable.run(
+                    state, risk_limits=risk_limits
+                )
+            except TypeError:
+                # Standalone Trader without risk_limits param
+                run_result = trader_callable.run(state)
+                if isinstance(run_result, tuple):
+                    raw_orders = run_result[0]
+                    trader_data = run_result[2] if len(run_result) > 2 else ""
+                else:
+                    raw_orders = run_result
+                    trader_data = ""
+        else:
+            run_result = trader_callable.run(state)
+            if isinstance(run_result, tuple):
+                raw_orders = run_result[0]
+                trader_data = run_result[2] if len(run_result) > 2 else ""
+            else:
+                raw_orders = run_result
+                trader_data = ""
+
+        # 5. Enforce position limits
+        valid_orders = enforce_limits(raw_orders, positions)
+
+        # 6. Build queue maps if queue model is active
+        buy_queues = None
+        sell_queues = None
+        if queue_model == "simple":
+            buy_queues = {sym: dict(depth.buy_orders) for sym, depth in order_depths.items()}
+            sell_queues = {
+                sym: {p: abs(v) for p, v in depth.sell_orders.items()}
+                for sym, depth in order_depths.items()
+            }
+
+        # 7. Match orders
+        fills = match_orders(
+            valid_orders,
+            order_depths,
+            market_trades_mt,
+            trade_match_mode,
+            buy_queues=buy_queues,
+            sell_queues=sell_queues,
+            passive_fill_rate=passive_fill_rate,
+        )
+
+        # 7. Process fills
+        tick_own_trades: dict[str, list[Trade]] = {}
+        for symbol, fill_list in fills.items():
+            tick_own_trades[symbol] = []
+            for fill in fill_list:
+                pnl_tracker.record_fill(symbol, fill.price, fill.quantity)
+                positions[symbol] = positions.get(symbol, 0) + fill.quantity
+                result.all_fills.append(fill)
+                tick_own_trades[symbol].append(
+                    Trade(
+                        symbol=symbol,
+                        price=fill.price,
+                        quantity=abs(fill.quantity),
+                        buyer="SUBMISSION" if fill.quantity > 0 else "",
+                        seller="SUBMISSION" if fill.quantity < 0 else "",
+                        timestamp=timestamp,
+                    )
+                )
+
+        own_trades = tick_own_trades
+
+        # 8. Record tick result
+        tick_pnl = pnl_tracker.total_pnl(mid_prices)
+        result.ticks.append(
+            TickResult(
+                timestamp=timestamp,
+                orders_submitted=raw_orders,
+                orders_after_limits=valid_orders,
+                fills=fills,
+                positions=dict(positions),
+                cash=pnl_tracker.cash,
+                pnl=tick_pnl,
+                mid_prices=dict(mid_prices),
+            )
+        )
+
+    result.final_pnl = pnl_tracker.total_pnl(mid_prices)
+    result.final_positions = dict(positions)
+    result.final_cash = pnl_tracker.cash
+
+    _log.info(
+        "Sim complete: %d fills, final PnL=%.2f",
+        len(result.all_fills),
+        result.final_pnl,
+    )
+
+    return result
+
+
 class SimEngine:
     """Run a strategy against historical data and collect results."""
 
@@ -93,149 +287,13 @@ class SimEngine:
             strategy_name=self.config.strategy_name,
             params=self.config.strategy_params or None,
         )
-        pnl_tracker = PnLTracker()
-        result = SimResult()
 
-        positions: dict[str, int] = {}
-        own_trades: dict[str, list[Trade]] = {}
-        trader_data: str = ""
-        mid_prices: dict[str, float] = {}
-
-        # Apply data split if configured
-        timestamps = data.timestamps
-        if self.config.data_split < 1.0:
-            n = max(1, int(len(timestamps) * self.config.data_split))
-            timestamps = timestamps[:n]
-
-        _log.info("Starting sim: %d ticks, strategy=%s", len(timestamps), self.config.strategy_name)
-
-        for timestamp in timestamps:
-            # 1. Build order depths and listings from price data
-            order_depths: dict[str, OrderDepth] = {}
-            mid_prices = {}
-            listings: dict[str, Listing] = {}
-
-            for product, price_row in data.prices.get(timestamp, {}).items():
-                order_depths[product] = _build_order_depth(
-                    price_row.bid_prices,
-                    price_row.bid_volumes,
-                    price_row.ask_prices,
-                    price_row.ask_volumes,
-                )
-                mid_prices[product] = price_row.mid_price
-                listings[product] = Listing(product, product, "SEASHELLS")
-
-            # 2. Build market trades for this tick
-            raw_trades: dict[str, list[Trade]] = {}
-            market_trades_mt: dict[str, list[MarketTrade]] = {}
-            for product, trade_rows in data.trades.get(timestamp, {}).items():
-                trades_list: list[Trade] = []
-                mt_list: list[MarketTrade] = []
-                for tr in trade_rows:
-                    t = Trade(
-                        symbol=tr.symbol,
-                        price=tr.price,
-                        quantity=tr.quantity,
-                        buyer=tr.buyer,
-                        seller=tr.seller,
-                        timestamp=tr.timestamp,
-                    )
-                    trades_list.append(t)
-                    # Apply queue penetration: scale available volume
-                    qp = self.config.queue_penetration
-                    bq = (
-                        max(1, round(tr.quantity * qp))
-                        if qp < 1.0 and tr.quantity > 0
-                        else tr.quantity
-                    )
-                    sq = (
-                        max(1, round(tr.quantity * qp))
-                        if qp < 1.0 and tr.quantity > 0
-                        else tr.quantity
-                    )
-                    mt_list.append(MarketTrade(trade=t, buy_quantity=bq, sell_quantity=sq))
-                raw_trades[product] = trades_list
-                market_trades_mt[product] = mt_list
-
-            # 3. Build TradingState
-            state = TradingState(
-                timestamp=timestamp,
-                traderData=trader_data,
-                listings=listings,
-                order_depths=copy.deepcopy(order_depths),
-                own_trades=own_trades,
-                market_trades={
-                    s: [
-                        Trade(t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp)
-                        for t in tl
-                    ]
-                    for s, tl in raw_trades.items()
-                },
-                position=dict(positions),
-                observations=Observation(),
-            )
-
-            # 4. Call trader (includes internal risk filtering)
-            raw_orders, _conversions, trader_data = trader.run(
-                state, risk_limits=self.config.risk_limits
-            )
-
-            # 5. Enforce Prosperity-faithful all-or-nothing position limits
-            valid_orders = enforce_limits(raw_orders, positions)
-
-            # 6. Match orders (jmerle/prosperity4bt semantics — no queue modeling)
-            fills = match_orders(
-                valid_orders,
-                order_depths,
-                market_trades_mt,
-                self.config.trade_match_mode,
-                passive_fill_rate=self.config.passive_fill_rate,
-            )
-
-            # 7. Process fills — update PnL tracker and positions
-            tick_own_trades: dict[str, list[Trade]] = {}
-            for symbol, fill_list in fills.items():
-                tick_own_trades[symbol] = []
-                for fill in fill_list:
-                    pnl_tracker.record_fill(symbol, fill.price, fill.quantity)
-                    positions[symbol] = positions.get(symbol, 0) + fill.quantity
-                    result.all_fills.append(fill)
-                    tick_own_trades[symbol].append(
-                        Trade(
-                            symbol=symbol,
-                            price=fill.price,
-                            quantity=abs(fill.quantity),
-                            buyer="SUBMISSION" if fill.quantity > 0 else "",
-                            seller="SUBMISSION" if fill.quantity < 0 else "",
-                            timestamp=timestamp,
-                        )
-                    )
-
-            own_trades = tick_own_trades
-
-            # 8. Record tick result
-            tick_pnl = pnl_tracker.total_pnl(mid_prices)
-            result.ticks.append(
-                TickResult(
-                    timestamp=timestamp,
-                    orders_submitted=raw_orders,
-                    orders_after_limits=valid_orders,
-                    fills=fills,
-                    positions=dict(positions),
-                    cash=pnl_tracker.cash,
-                    pnl=tick_pnl,
-                    mid_prices=dict(mid_prices),
-                )
-            )
-
-        result.final_pnl = pnl_tracker.total_pnl(mid_prices)
-        result.final_positions = dict(positions)
-        result.final_cash = pnl_tracker.cash
-
-        _log.info(
-            "Sim complete: %d fills, final PnL=%.2f",
-            len(result.all_fills),
-            result.final_pnl,
+        return run_simulation(
+            trader_callable=trader,
+            data=data,
+            trade_match_mode=self.config.trade_match_mode,
+            passive_fill_rate=self.config.passive_fill_rate,
+            queue_penetration=self.config.queue_penetration,
+            data_split=self.config.data_split,
+            risk_limits=self.config.risk_limits,
         )
-
-        return result

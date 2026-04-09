@@ -115,7 +115,7 @@ def add_cross_day_info(
 
 @dataclass
 class FillDiagnostics:
-    """Passive vs aggressive fill breakdown."""
+    """Execution quality diagnostics — passive vs aggressive, markouts, edge."""
 
     total_fills: int = 0
     passive_fills: int = 0
@@ -125,14 +125,14 @@ class FillDiagnostics:
     avg_inventory: float = 0.0
     max_inventory: int = 0
     turnover: float = 0.0
+    avg_markout_5: float = 0.0
+    adverse_rate_5: float = 0.0
+    avg_edge: float = 0.0
+    inventory_half_life: float = 0.0
 
 
 def compute_fill_diagnostics(metrics: dict[str, float]) -> FillDiagnostics:
-    """Build FillDiagnostics from sweep worker metrics dict.
-
-    The sweep worker already computes passive/aggressive counts and
-    inventory stats — this just wraps them in a typed dataclass.
-    """
+    """Build FillDiagnostics from sweep worker metrics dict."""
     total = int(metrics.get("total_fills", 0))
     passive = int(metrics.get("passive_fills", 0))
     aggressive = int(metrics.get("aggressive_fills", 0))
@@ -141,10 +141,14 @@ def compute_fill_diagnostics(metrics: dict[str, float]) -> FillDiagnostics:
         passive_fills=passive,
         aggressive_fills=aggressive,
         passive_fill_share=metrics.get("passive_fill_share", 0.0),
-        passive_pnl_share=0.0,  # computed later if per-fill PnL available
+        passive_pnl_share=0.0,
         avg_inventory=metrics.get("avg_inventory", 0.0),
         max_inventory=int(metrics.get("max_inventory", 0)),
         turnover=metrics.get("turnover", 0.0),
+        avg_markout_5=metrics.get("avg_markout_5", 0.0),
+        adverse_rate_5=metrics.get("adverse_rate_5", 0.0),
+        avg_edge=metrics.get("avg_edge", 0.0),
+        inventory_half_life=metrics.get("inventory_half_life", 0.0),
     )
 
 

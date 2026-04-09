@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -133,189 +132,182 @@ def _wrap_strategy_cls(cls: type) -> type:
     return _WrappedTrader
 
 
-def _sweep_worker(
-    args: tuple[int, dict[str, Any], str, BacktestData, bool, float],
-) -> tuple[int, dict[str, Any], dict[str, float]]:
-    """Run one sweep combo. Top-level function for ProcessPoolExecutor (picklable).
+def _extract_metrics_from_result(sim_result: Any, data: BacktestData) -> dict[str, Any]:
+    """Extract metrics dict from a SimResult for sweep/evaluation use."""
+    n_ticks = len(data.timestamps)
+    all_fills = sim_result.all_fills
+    total_fills = len(all_fills)
+    passive_fills = sum(1 for f in all_fills if f.against == "market_trade")
+    aggressive_fills = total_fills - passive_fills
+    passive_share = passive_fills / max(1, total_fills)
 
-    Args:
-        args: Tuple of (index, params, source_code, data, fast, passive_fill_rate).
-
-    Returns:
-        Tuple of (index, params, metrics_dict).
-    """
-    index, params, source_code, data, _fast, passive_fill_rate = args
-
-    # Inject params and build Trader
-    modified_source = _apply_params_to_source(source_code, params)
-    trader_cls = _make_trader_from_source(modified_source)
-    trader = trader_cls()
-
-    # Run simulation directly (no registry needed)
-    from sim.engine import _build_order_depth
-    from sim.limits import enforce_limits
-    from sim.matching import MarketTrade, TradeMatchingMode, match_orders
-    from sim.pnl import PnLTracker
-    from trader.datamodel import Listing, Observation, OrderDepth, Trade, TradingState
-
-    pnl_tracker = PnLTracker()
+    # Inventory tracking from tick results
+    position_sum = 0.0
+    max_inv = 0
     positions: dict[str, int] = {}
-    own_trades: dict[str, list[Trade]] = {}
-    trader_data: str = ""
-    mid_prices: dict[str, float] = {}
-    total_fills = 0
-    passive_fills = 0
-    aggressive_fills = 0
-    position_sum = 0  # for avg inventory
-    # Per-symbol tracking
     per_sym_fills: dict[str, int] = {}
     per_sym_passive: dict[str, int] = {}
     per_sym_aggressive: dict[str, int] = {}
     per_sym_pos_sum: dict[str, float] = {}
     per_sym_max_pos: dict[str, int] = {}
 
-    for timestamp in data.timestamps:
-        order_depths: dict[str, OrderDepth] = {}
-        mid_prices = {}
-        listings: dict[str, Listing] = {}
-
-        for product, price_row in data.prices.get(timestamp, {}).items():
-            order_depths[product] = _build_order_depth(
-                price_row.bid_prices,
-                price_row.bid_volumes,
-                price_row.ask_prices,
-                price_row.ask_volumes,
-            )
-            mid_prices[product] = price_row.mid_price
-            listings[product] = Listing(product, product, "SEASHELLS")
-
-        raw_trades: dict[str, list[Trade]] = {}
-        market_trades_mt: dict[str, list[MarketTrade]] = {}
-        for product, trade_rows in data.trades.get(timestamp, {}).items():
-            trades_list: list[Trade] = []
-            mt_list: list[MarketTrade] = []
-            for tr in trade_rows:
-                t = Trade(
-                    symbol=tr.symbol,
-                    price=tr.price,
-                    quantity=tr.quantity,
-                    buyer=tr.buyer,
-                    seller=tr.seller,
-                    timestamp=tr.timestamp,
-                )
-                trades_list.append(t)
-                mt_list.append(
-                    MarketTrade(trade=t, buy_quantity=tr.quantity, sell_quantity=tr.quantity)
-                )
-            raw_trades[product] = trades_list
-            market_trades_mt[product] = mt_list
-
-        state = TradingState(
-            timestamp=timestamp,
-            traderData=trader_data,
-            listings=listings,
-            order_depths=copy.deepcopy(order_depths),
-            own_trades=own_trades,
-            market_trades={
-                s: [
-                    Trade(t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp) for t in tl
-                ]
-                for s, tl in raw_trades.items()
-            },
-            position=dict(positions),
-            observations=Observation(),
-        )
-
-        # Call trader
-        result = trader.run(state)
-        if isinstance(result, tuple):
-            raw_orders = result[0]
-            trader_data = result[2] if len(result) > 2 else ""
+    for fill in all_fills:
+        sym = fill.symbol
+        per_sym_fills[sym] = per_sym_fills.get(sym, 0) + 1
+        if fill.against == "market_trade":
+            per_sym_passive[sym] = per_sym_passive.get(sym, 0) + 1
         else:
-            raw_orders = result
-            trader_data = ""
+            per_sym_aggressive[sym] = per_sym_aggressive.get(sym, 0) + 1
 
-        # Enforce position limits
-        valid_orders = enforce_limits(raw_orders, positions)
-
-        # Match orders
-        fills = match_orders(
-            valid_orders,
-            order_depths,
-            market_trades_mt,
-            TradeMatchingMode.ALL,
-            passive_fill_rate=passive_fill_rate,
-        )
-
-        # Process fills
-        tick_own_trades: dict[str, list[Trade]] = {}
-        for symbol, fill_list in fills.items():
-            tick_own_trades[symbol] = []
-            for fill in fill_list:
-                pnl_tracker.record_fill(symbol, fill.price, fill.quantity)
-                positions[symbol] = positions.get(symbol, 0) + fill.quantity
-                total_fills += 1
-                per_sym_fills[symbol] = per_sym_fills.get(symbol, 0) + 1
-                if fill.against == "market_trade":
-                    passive_fills += 1
-                    per_sym_passive[symbol] = per_sym_passive.get(symbol, 0) + 1
-                else:
-                    aggressive_fills += 1
-                    per_sym_aggressive[symbol] = per_sym_aggressive.get(symbol, 0) + 1
-                tick_own_trades[symbol].append(
-                    Trade(
-                        symbol=symbol,
-                        price=fill.price,
-                        quantity=abs(fill.quantity),
-                        buyer="SUBMISSION" if fill.quantity > 0 else "",
-                        seller="SUBMISSION" if fill.quantity < 0 else "",
-                        timestamp=timestamp,
-                    )
-                )
-        own_trades = tick_own_trades
-
-        # Track inventory for diagnostics
-        position_sum += sum(abs(v) for v in positions.values())
-        for sym, pos in positions.items():
+    for tick in sim_result.ticks:
+        tick_inv = sum(abs(v) for v in tick.positions.values())
+        position_sum += tick_inv
+        max_inv = max(max_inv, max((abs(v) for v in tick.positions.values()), default=0))
+        for sym, pos in tick.positions.items():
             per_sym_pos_sum[sym] = per_sym_pos_sum.get(sym, 0.0) + abs(pos)
             per_sym_max_pos[sym] = max(per_sym_max_pos.get(sym, 0), abs(pos))
+        positions = dict(tick.positions)
 
-    n_ticks = len(data.timestamps)
-    final_pnl = pnl_tracker.total_pnl(mid_prices)
-    total_volume = sum(abs(v) for v in pnl_tracker.positions.values())
-    passive_share = passive_fills / total_fills if total_fills > 0 else 0.0
-    # Per-symbol PnL (cash + unrealized)
-    products = set(pnl_tracker.cash_by_product.keys()) | set(positions.keys())
+    # Per-symbol PnL
+    mid_prices = sim_result.ticks[-1].mid_prices if sim_result.ticks else {}
+    cash_by_product: dict[str, float] = {}
+    for fill in all_fills:
+        cash_by_product[fill.symbol] = (
+            cash_by_product.get(fill.symbol, 0.0) - fill.price * fill.quantity
+        )
+
     by_symbol: dict[str, dict[str, float]] = {}
+    products = set(cash_by_product.keys()) | set(positions.keys())
     for sym in products:
-        sym_cash = pnl_tracker.cash_by_product.get(sym, 0.0)
+        sym_cash = cash_by_product.get(sym, 0.0)
         sym_pos = positions.get(sym, 0)
         sym_mid = mid_prices.get(sym, 0.0)
-        sym_fills = per_sym_fills.get(sym, 0)
-        sym_passive = per_sym_passive.get(sym, 0)
+        sym_f = per_sym_fills.get(sym, 0)
+        sym_p = per_sym_passive.get(sym, 0)
         by_symbol[sym] = {
             "pnl": sym_cash + sym_pos * sym_mid,
             "cash": sym_cash,
-            "fills": float(sym_fills),
-            "passive_fills": float(sym_passive),
+            "fills": float(sym_f),
+            "passive_fills": float(sym_p),
             "aggressive_fills": float(per_sym_aggressive.get(sym, 0)),
-            "passive_fill_share": sym_passive / max(1, sym_fills),
+            "passive_fill_share": sym_p / max(1, sym_f),
             "avg_inventory": per_sym_pos_sum.get(sym, 0.0) / max(1, n_ticks),
             "max_inventory": float(per_sym_max_pos.get(sym, 0)),
         }
 
-    metrics = {
-        "total_pnl": final_pnl,
-        "final_cash": pnl_tracker.cash,
+    # Extract tick-level PnL path for block evaluation
+    pnl_path = [tick.pnl for tick in sim_result.ticks]
+
+    # Per-asset PnL paths
+    per_asset_pnl_paths: dict[str, list[float]] = {}
+    for sym in products:
+        sym_path: list[float] = []
+        running_cash = 0.0
+        for tick in sim_result.ticks:
+            for fill in tick.fills.get(sym, []):
+                running_cash -= fill.price * fill.quantity
+            pos = tick.positions.get(sym, 0)
+            mid = tick.mid_prices.get(sym, 0.0)
+            sym_path.append(running_cash + pos * mid)
+        per_asset_pnl_paths[sym] = sym_path
+
+    # Markout computation (price quality after fills)
+    # Iterate through ticks to associate fills with their tick index
+    ticks = sim_result.ticks
+    markout_values: list[float] = []
+    edge_values: list[float] = []
+    for tick_idx, tick in enumerate(ticks):
+        for sym, fill_list in tick.fills.items():
+            fill_mid = tick.mid_prices.get(sym, 0.0)
+            future_idx = min(tick_idx + 5, len(ticks) - 1)
+            future_mid = ticks[future_idx].mid_prices.get(sym, fill_mid)
+            for fill in fill_list:
+                # Edge: how far from mid we filled (positive = favorable)
+                if fill.quantity > 0:
+                    edge_values.append(fill_mid - fill.price)
+                    markout_values.append(future_mid - fill_mid)
+                else:
+                    edge_values.append(fill.price - fill_mid)
+                    markout_values.append(fill_mid - future_mid)
+
+    avg_markout = sum(markout_values) / max(1, len(markout_values))
+    adverse_rate = sum(1 for m in markout_values if m < 0) / max(1, len(markout_values))
+    avg_edge = sum(edge_values) / max(1, len(edge_values))
+
+    # Inventory half-life
+    inv_half_lives: list[int] = []
+    for sym in products:
+        peaks: list[tuple[int, int]] = []  # (tick_idx, abs_position)
+        for i, tick in enumerate(sim_result.ticks):
+            pos = abs(tick.positions.get(sym, 0))
+            if i > 0 and i < len(sim_result.ticks) - 1:
+                prev_pos = abs(sim_result.ticks[i - 1].positions.get(sym, 0))
+                next_pos = abs(sim_result.ticks[i + 1].positions.get(sym, 0))
+                if pos > prev_pos and pos >= next_pos and pos > 10:
+                    peaks.append((i, pos))
+        for peak_idx, peak_pos in peaks:
+            half_target = peak_pos / 2
+            for j in range(peak_idx + 1, len(sim_result.ticks)):
+                if abs(sim_result.ticks[j].positions.get(sym, 0)) <= half_target:
+                    inv_half_lives.append(j - peak_idx)
+                    break
+    avg_half_life = sum(inv_half_lives) / max(1, len(inv_half_lives))
+
+    return {
+        "total_pnl": sim_result.final_pnl,
+        "final_cash": sim_result.final_cash,
         "total_fills": float(total_fills),
         "passive_fills": float(passive_fills),
         "aggressive_fills": float(aggressive_fills),
         "passive_fill_share": passive_share,
-        "avg_inventory": position_sum / n_ticks if n_ticks > 0 else 0.0,
-        "max_inventory": float(max((abs(v) for v in positions.values()), default=0)),
-        "turnover": float(total_volume) / n_ticks if n_ticks > 0 else 0.0,
+        "avg_inventory": position_sum / max(1, n_ticks),
+        "max_inventory": float(max_inv),
+        "turnover": float(sum(abs(f.quantity) for f in all_fills)) / max(1, n_ticks),
         "by_symbol": by_symbol,
+        "pnl_path": pnl_path,
+        "per_asset_pnl_paths": per_asset_pnl_paths,
+        "avg_markout_5": avg_markout,
+        "adverse_rate_5": adverse_rate,
+        "avg_edge": avg_edge,
+        "inventory_half_life": avg_half_life,
     }
+
+
+def _sweep_worker(
+    args: tuple[int, dict[str, Any], str, BacktestData, bool, float, str, str],
+) -> tuple[int, dict[str, Any], dict[str, float]]:
+    """Run one sweep combo. Top-level function for ProcessPoolExecutor (picklable).
+
+    Args:
+        args: Tuple of (index, params, source_code, data, fast,
+              passive_fill_rate, trade_match_mode_str, queue_model).
+
+    Returns:
+        Tuple of (index, params, metrics_dict).
+    """
+    index, params, source_code, data, _fast, passive_fill_rate, tmm_str, qm = args
+
+    # Inject params and build Trader
+    modified_source = _apply_params_to_source(source_code, params)
+    trader_cls = _make_trader_from_source(modified_source)
+    trader = trader_cls()
+
+    # Use the ONE canonical simulation path
+    from sim.engine import run_simulation
+    from sim.matching import TradeMatchingMode
+
+    tmm = TradeMatchingMode(tmm_str) if tmm_str else TradeMatchingMode.ALL
+
+    sim_result = run_simulation(
+        trader_callable=trader,
+        data=data,
+        passive_fill_rate=passive_fill_rate,
+        trade_match_mode=tmm,
+        queue_model=qm,
+    )
+
+    # Extract metrics from SimResult
+    metrics = _extract_metrics_from_result(sim_result, data)
     return index, params, metrics
 
 
@@ -344,9 +336,10 @@ def run_sweep_parallel(
     total = len(combos)
     _log.info("Parallel sweep: %d combinations, %d workers", total, max_workers)
 
-    # Build task arguments
+    # Build task arguments (extra scenario params default to baseline)
     tasks = [
-        (i, combo, strategy_source, data, fast, passive_fill_rate) for i, combo in enumerate(combos)
+        (i, combo, strategy_source, data, fast, passive_fill_rate, "all", "none")
+        for i, combo in enumerate(combos)
     ]
 
     results: list[tuple[dict[str, Any], dict[str, float]]] = []

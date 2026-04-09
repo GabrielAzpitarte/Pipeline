@@ -153,15 +153,15 @@ class AgentMemory:
         return valid[:n]
 
     def _update_best_status(self) -> None:
-        """Mark the highest-PnL card as 'best', reset others."""
-        best_pnl = float("-inf")
+        """Mark the best card using transfer_score (not raw PnL)."""
+        best_score = float("-inf")
         best_idx = -1
         for i, card in enumerate(self._cards):
-            if card.get("status") == "failed":
+            if card.get("status") == "failed" or card.get("deprecated"):
                 continue
-            pnl = card.get("pnl", 0.0)
-            if pnl > best_pnl:
-                best_pnl = pnl
+            score = card.get("transfer_score", card.get("pnl", 0.0) / 10000)
+            if score > best_score:
+                best_score = score
                 best_idx = i
 
         for card in self._cards:
@@ -169,6 +169,144 @@ class AgentMemory:
                 card["status"] = "tested"
         if best_idx >= 0:
             self._cards[best_idx]["status"] = "best"
+
+    # ---- Evidence-aware retrieval ------------------------------------------
+
+    def platform_proven(self) -> list[dict[str, Any]]:
+        """Return only platform-tested strategies."""
+        return [c for c in self._cards if c.get("platform_tested")]
+
+    def by_verdict(self, verdict: str) -> list[dict[str, Any]]:
+        """Return strategies with a specific verdict."""
+        return [c for c in self._cards if c.get("verdict") == verdict]
+
+    def by_family(self, family: str) -> list[dict[str, Any]]:
+        """Return strategies in a specific architecture family."""
+        return [c for c in self._cards if c.get("architecture_family") == family]
+
+    def family_distribution(self) -> dict[str, int]:
+        """Count strategies per family — detect if stuck in one family."""
+        dist: dict[str, int] = {}
+        for card in self._cards:
+            fam = card.get("architecture_family", "unknown")
+            dist[fam] = dist.get(fam, 0) + 1
+        return dist
+
+    def recent_cards(self, n_rounds: int = 5) -> list[dict[str, Any]]:
+        """Return strategies from the last N rounds."""
+        if not self._cards:
+            return []
+        max_round = max(c.get("round", 0) for c in self._cards)
+        cutoff = max_round - n_rounds
+        return [c for c in self._cards if c.get("round", 0) >= cutoff]
+
+    def deprecated_cards(self) -> list[dict[str, Any]]:
+        """Return deprecated strategies (searchable but not authoritative)."""
+        return [c for c in self._cards if c.get("deprecated")]
+
+    def evidence_pack(self) -> dict[str, list[dict[str, Any]]]:
+        """Return a balanced evidence pack for ideation prompts.
+
+        Provides one example from each category so strategists see
+        diversity, not just winners.
+        """
+        pack: dict[str, list[dict[str, Any]]] = {
+            "robust_winners": [],
+            "platform_proven": [],
+            "fragile_examples": [],
+            "diverse_architectures": [],
+        }
+        # Robust winners (by transfer score)
+        robust = sorted(
+            [c for c in self._cards if c.get("verdict") == "robust" and not c.get("deprecated")],
+            key=lambda c: c.get("transfer_score", 0),
+            reverse=True,
+        )
+        pack["robust_winners"] = robust[:2]
+
+        # Platform proven
+        proven = [c for c in self._cards if c.get("platform_tested")]
+        pack["platform_proven"] = proven[:2]
+
+        # Fragile examples (for learning what fails)
+        fragile = [
+            c
+            for c in self._cards
+            if c.get("verdict", "").endswith("fragile") and not c.get("deprecated")
+        ]
+        pack["fragile_examples"] = fragile[:2]
+
+        # Diverse: one from each family
+        seen_families: set[str] = set()
+        for card in sorted(self._cards, key=lambda c: c.get("transfer_score", 0), reverse=True):
+            fam = card.get("architecture_family", "unknown")
+            if fam not in seen_families and not card.get("deprecated"):
+                pack["diverse_architectures"].append(card)
+                seen_families.add(fam)
+            if len(pack["diverse_architectures"]) >= 4:
+                break
+
+        # Dead-end branches (don't repeat these)
+        pack["dead_end_branches"] = self.detect_dead_ends()[:3]
+
+        return pack
+
+    def age_cards(self, current_round: int, max_age: int = 10) -> None:
+        """Mark old untested cards as deprecated."""
+        for card in self._cards:
+            age = current_round - card.get("round", 0)
+            if (
+                age > max_age
+                and not card.get("platform_tested")
+                and card.get("status") != "best"
+                and not card.get("deprecated")
+            ):
+                card["deprecated"] = True
+                card["confidence"] = "stale"
+        self._save_cards()
+
+    # ---- Genealogy -------------------------------------------------------
+
+    def get_lineage(self, name: str) -> list[dict[str, Any]]:
+        """Trace the ancestry of a strategy back to its root."""
+        lineage: list[dict[str, Any]] = []
+        current = name
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(current)
+            card = next((c for c in self._cards if c.get("name") == current), None)
+            if card is None:
+                break
+            lineage.append(card)
+            current = card.get("parent_strategy")
+        return lineage
+
+    def get_descendants(self, name: str) -> list[dict[str, Any]]:
+        """Find all strategies derived from a given parent."""
+        return [c for c in self._cards if c.get("parent_strategy") == name]
+
+    def detect_dead_ends(self) -> list[str]:
+        """Find parent strategies whose descendants all failed or are fragile.
+
+        A dead end is a strategy that has 2+ descendants, and ALL descendants
+        have verdict in (reject, queue_fragile, passive_fragile, simulator_artifact).
+        """
+        parents: dict[str, list[dict[str, Any]]] = {}
+        for card in self._cards:
+            parent = card.get("parent_strategy")
+            if parent:
+                parents.setdefault(parent, []).append(card)
+
+        dead_ends: list[str] = []
+        bad_verdicts = {"reject", "queue_fragile", "passive_fragile", "simulator_artifact"}
+        for parent_name, children in parents.items():
+            if len(children) >= 2 and all(
+                c.get("verdict", "") in bad_verdicts or c.get("status") == "failed"
+                for c in children
+            ):
+                dead_ends.append(parent_name)
+
+        return dead_ends
 
     def _save_cards(self) -> None:
         """Write strategy cards to disk."""

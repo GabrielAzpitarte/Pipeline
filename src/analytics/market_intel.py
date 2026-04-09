@@ -115,6 +115,95 @@ class AssetIntelligence:
     n_ticks: int = 0
 
 
+@dataclass
+class AssetProfile:
+    """Structured classification of an asset's behavior for strategy routing."""
+
+    symbol: str = ""
+    regime: str = "unknown"  # "stationary" | "drifting" | "trending"
+    maker_viability: str = "unknown"  # "strong" | "moderate" | "weak"
+    taker_viability: str = "unknown"  # "strong" | "moderate" | "weak"
+    fill_quality: str = "unknown"  # "favorable" | "neutral" | "adverse"
+    inventory_risk: str = "unknown"  # "low" | "moderate" | "high"
+    recommended_families: list[str] = field(default_factory=list)
+    confidence: str = "low"  # "high" | "medium" | "low"
+
+
+def classify_asset(intel: AssetIntelligence) -> AssetProfile:
+    """Classify an asset from its intelligence data into a structured profile."""
+    pd = intel.price_dynamics
+    fo = intel.fill_opportunity
+    ir = intel.inventory_risk
+
+    # Regime
+    if abs(pd.drift_per_1000_ticks) < 2.0 and pd.price_range < 50:
+        regime = "stationary"
+    elif pd.return_autocorr_1 > 0.1:
+        regime = "trending"
+    else:
+        regime = "drifting"
+
+    # Maker viability
+    if fo.penny_touch_rate > 0.03 and fo.edge_1_markout > 0:
+        maker = "strong"
+    elif fo.penny_touch_rate > 0.01:
+        maker = "moderate"
+    else:
+        maker = "weak"
+
+    # Taker viability
+    if fo.taker_opportunity_rate > 0.01:
+        taker = "strong"
+    elif fo.taker_opportunity_rate > 0.005:
+        taker = "moderate"
+    else:
+        taker = "weak"
+
+    # Fill quality
+    if fo.edge_1_markout > 0 and fo.adverse_selection_1 < 0.4:
+        fill_q = "favorable"
+    elif fo.edge_1_markout < -0.5 or fo.adverse_selection_1 > 0.6:
+        fill_q = "adverse"
+    else:
+        fill_q = "neutral"
+
+    # Inventory risk
+    if ir.naive_limit_hit_rate > 5:
+        inv_risk = "high"
+    elif ir.naive_limit_hit_rate > 1:
+        inv_risk = "moderate"
+    else:
+        inv_risk = "low"
+
+    # Recommended families based on profile
+    families: list[str] = []
+    if regime == "stationary" and maker == "strong":
+        families.extend(["taker_pennying", "passive_maker"])
+    if regime == "drifting":
+        families.extend(["bifurcated_specialist", "mean_reversion_sniper"])
+    if taker == "strong":
+        families.append("pure_taker")
+    if pd.mean_reversion_strength > 0.05:
+        families.append("mean_reversion_sniper")
+    if not families:
+        families.append("taker_pennying")
+
+    # Confidence
+    stable_count = len(intel.cross_day.stable_features)
+    confidence = "high" if stable_count >= 3 else "medium" if stable_count >= 1 else "low"
+
+    return AssetProfile(
+        symbol=intel.symbol,
+        regime=regime,
+        maker_viability=maker,
+        taker_viability=taker,
+        fill_quality=fill_q,
+        inventory_risk=inv_risk,
+        recommended_families=list(dict.fromkeys(families)),  # dedupe preserving order
+        confidence=confidence,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Computation helpers
 # ---------------------------------------------------------------------------

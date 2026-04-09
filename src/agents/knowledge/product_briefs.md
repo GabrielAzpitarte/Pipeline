@@ -610,3 +610,19 @@
 ## Round 20 results
 - agent_r20_bifurcated_micro_penny_sniper (gemini): PnL=10511 [GOOD] — Bifurcated strategy using fixed fair value wide quoting for stationary assets an
 - agent_r20_asset_split_passive_emeralds_active_tomatoes (openai): PnL=10579 [GOOD] — Bifurcated quoting: EMERALDS uses conservative fixed-fair passive market making
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
