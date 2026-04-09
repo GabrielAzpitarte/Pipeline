@@ -59,7 +59,10 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # datamodel.py must match Prosperity's camelCase API exactly.
 "src/trader/datamodel.py" = ["N803"]
-"src/trader/strategies/microprice_sniper_proven.py" = ["N803"]
+"src/trader/strategies/microprice_sniper_proven.py" = ["N803", "F841", "UP006"]
+# Proven strategies use Prosperity submission format (minified, camelCase).
+"src/trader/strategies/taker_penny_proven.py" = ["N803", "N805", "E701", "E702"]
+"src/trader/strategies/agent_r*.py" = ["N803", "N805", "E701", "E702", "F841"]
 # TradingStateSchema field names must match Prosperity JSON keys.
 "src/data/schemas.py" = ["N815"]
 # typer uses function calls in argument defaults (standard pattern).

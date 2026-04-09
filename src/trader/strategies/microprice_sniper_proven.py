@@ -188,6 +188,7 @@ class Trader:
             obi = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
 
             # Adjusted fair
+            adjusted_fair = fair - pos * SKEW_FACTOR + obi * 2
             edge = max(1, int(vol * EDGE_MULTIPLIER))
 
             # Generate orders

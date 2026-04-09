@@ -7,7 +7,7 @@ from typing import Any
 _SYSTEM = (
     "You are an expert Python developer writing trading strategies for the IMC Prosperity "
     "competition. You write clean, correct, profitable code. "
-    "Output ONLY a JSON object, no markdown fencing or explanation."
+    "Output ONLY the Python code inside a ```python code block. No explanation, no JSON wrapping."
 )
 
 
@@ -22,16 +22,41 @@ def build_patching_prompt(
     """
     name = candidate.get("name", "new_strategy")
     description = candidate.get("description", "")
+    per_asset_logic = candidate.get("per_asset_logic", {})
+    unwind_logic = candidate.get("unwind_logic", "")
+    key_innovation = candidate.get("key_innovation", "")
     modifications = candidate.get("modifications", "")
 
-    user_msg = f"""## Task
-Write a complete Python strategy file based on this specification:
+    # Build detailed spec from structured fields if available
+    if per_asset_logic:
+        asset_specs = ""
+        for asset_type, logic in per_asset_logic.items():
+            asset_specs += f"\n### {asset_type}\n{logic}\n"
 
+        spec_block = f"""## Strategy Specification (implement EXACTLY as described)
+
+**Name:** {name}
+**Summary:** {description}
+**Key innovation:** {key_innovation}
+
+## Per-Asset Logic
+{asset_specs}
+### Unwind/Safety Logic (all assets)
+{unwind_logic}
+"""
+    else:
+        spec_block = f"""## Strategy Specification
 **Name:** {name}
 **Description:** {description}
 **Modifications from base:** {modifications}
+"""
 
-## Base strategy code to modify
+    user_msg = f"""## Task
+Implement this trading strategy EXACTLY as specified. Do not deviate from the logic described.
+
+{spec_block}
+
+## Base strategy code (for reference — modify as needed)
 ```python
 {base_strategy_code}
 ```
@@ -49,25 +74,28 @@ Write a complete Python strategy file based on this specification:
   from trader.utils import mid_price_from_depth, best_bid, best_ask
   ```
 - Strategy must be pure: state in, orders out, no side effects
-- Keep it under 60 lines
+- MUST handle each asset with appropriate logic (stationary vs drifting)
+- Position limit is 80 per asset — never exceed it
+- Classify each asset by its behavior and apply the matching logic from the spec
 
-## Parameter Guidelines (use sensible defaults — a sweep will optimize later)
+## Parameter Guidelines
 - Order sizes: 10-20 (never >20, never <5)
-- Skew factors: 0.1-1.0 (avoid >1.5 — causes blowups)
+- Skew factors: 0.1-1.0
 - EMA alpha: 0.05-0.30
-- Unwind threshold: 40-65 (never >70 — too close to limit 80)
-- Spreads: use pennying (best_bid+1, best_ask-1) when possible
-- EMERALDS fair value: always 10000 (it's stationary)
+- Unwind threshold: 40-65
+- EMERALDS fair value: always 10000
 
-## Safety checks
-- If position > 60, add aggressive unwind logic (cross the spread to reduce)
+## Critical Safety
+- If abs(position) > 55: MUST add aggressive unwind (cross the spread)
+- Always quote every tick — don't skip ticks
 - Don't use numpy — use math stdlib only
-- Test mentally: what happens at position=75? At position=-75? Does it unwind?
+- Check: does unwind work at position=75? At position=-75?
 
-Output a JSON object:
-{{
-  "code": "the complete Python file content as a string",
-  "default_params": {{"param_name": default_value}}
-}}"""
+Output ONLY the complete Python file inside a ```python code block. Nothing else — no JSON, no explanation.
+
+```python
+from __future__ import annotations
+...your code here...
+```"""
 
     return _SYSTEM, [{"role": "user", "content": user_msg}]

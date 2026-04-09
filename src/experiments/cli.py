@@ -56,6 +56,9 @@ def sweep(
     top_n: int = typer.Option(10, "--top", "-n"),
     artifacts_dir: Path | None = typer.Option(None, "--artifacts-dir"),
     parallel: int = typer.Option(0, "--parallel", "-j", help="Number of workers (0=sequential)"),
+    ranking: str = typer.Option(
+        "raw_pnl", "--ranking", "-r", help="Ranking method: raw_pnl | transfer_score"
+    ),
 ) -> None:
     """Run a parameter sweep from a TOML config file."""
     from experiments.config import load_config

@@ -184,14 +184,20 @@ def build_ideation_prompt(
 ## Task
 {task}
 
-Output a JSON object:
+Output a JSON object with ONE candidate. Be EXTREMELY SPECIFIC about the logic — describe exactly what the code should do, step by step, for EACH asset type (stationary vs drifting). The coder needs an unambiguous spec, not a vague idea.
+
 {{
   "candidates": [
     {{
       "name": "short_snake_case_name",
-      "description": "ARCHITECTURAL description of what the strategy does",
+      "description": "One-line summary of the architecture",
       "base_strategy": "market_maker or fair_value or inventory_mm",
-      "modifications": "describe LOGIC changes, not parameter values"
+      "per_asset_logic": {{
+        "stationary_assets": "EXACT step-by-step logic for stationary/mean-reverting assets. Example: 1) fair_value = known_fair (e.g. 10000). 2) if spread>2: penny at bb+1 and ba-1 with size 12. 3) if ask < fair-2: buy aggressively at ask, size min(10, available). 4) skew quotes by position*0.5.",
+        "drifting_assets": "EXACT step-by-step logic for drifting/trending assets. Example: 1) compute microprice = (bb*ask_vol + ba*bid_vol)/(total_vol). 2) ema = alpha*microprice + (1-alpha)*prev_ema. 3) fair = ema + momentum*weight. 4) penny at bb+1/ba-1 with size 12. 5) if ba < fair-edge: buy at ba, size 10."
+      }},
+      "unwind_logic": "When and how to unwind inventory for ALL assets. Example: if abs(pos)>55: cross the spread with size min(20, abs(pos)). Always unwind before quoting.",
+      "key_innovation": "What makes this different from what we already tried. Be specific — reference the asset briefing data (fill rates, markouts, mean reversion strength, etc.)."
     }}
   ]
 }}"""

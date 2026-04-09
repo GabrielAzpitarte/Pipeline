@@ -51,6 +51,7 @@ def match_buy_order(
     market_trades: list[MarketTrade],
     mode: TradeMatchingMode = TradeMatchingMode.ALL,
     buy_queue_remaining: dict[int, int] | None = None,
+    passive_fill_rate: float = 1.0,
 ) -> list[Fill]:
     """Match a buy order against sell side of book + market trades.
 
@@ -101,7 +102,13 @@ def match_buy_order(
             # Fill from whatever's left after queue consumption
             if mt.sell_quantity <= 0:
                 continue
-            fill_qty = min(remaining, mt.sell_quantity)
+
+            # Apply passive fill rate at same price (not price-through)
+            available = mt.sell_quantity
+            if mt.trade.price == order.price and passive_fill_rate < 1.0:
+                available = max(1, int(available * passive_fill_rate))
+
+            fill_qty = min(remaining, available)
             fills.append(
                 Fill(
                     symbol=order.symbol,
@@ -122,6 +129,7 @@ def match_sell_order(
     market_trades: list[MarketTrade],
     mode: TradeMatchingMode = TradeMatchingMode.ALL,
     sell_queue_remaining: dict[int, int] | None = None,
+    passive_fill_rate: float = 1.0,
 ) -> list[Fill]:
     """Match a sell order against buy side of book + market trades.
 
@@ -172,7 +180,13 @@ def match_sell_order(
             # Fill from whatever's left
             if mt.buy_quantity <= 0:
                 continue
-            fill_qty = min(remaining, mt.buy_quantity)
+
+            # Apply passive fill rate at same price (not price-through)
+            available = mt.buy_quantity
+            if mt.trade.price == order.price and passive_fill_rate < 1.0:
+                available = max(1, int(available * passive_fill_rate))
+
+            fill_qty = min(remaining, available)
             fills.append(
                 Fill(
                     symbol=order.symbol,
@@ -194,6 +208,7 @@ def match_orders(
     mode: TradeMatchingMode = TradeMatchingMode.ALL,
     buy_queues: dict[str, dict[int, int]] | None = None,
     sell_queues: dict[str, dict[int, int]] | None = None,
+    passive_fill_rate: float = 1.0,
 ) -> dict[str, list[Fill]]:
     """Match all orders with queue position modeling."""
     all_fills: dict[str, list[Fill]] = {}
@@ -209,9 +224,13 @@ def match_orders(
 
         for order in order_list:
             if order.quantity > 0:
-                fills = match_buy_order(order, depth, trades_for_sym, mode, bq or None)
+                fills = match_buy_order(
+                    order, depth, trades_for_sym, mode, bq or None, passive_fill_rate
+                )
             elif order.quantity < 0:
-                fills = match_sell_order(order, depth, trades_for_sym, mode, sq or None)
+                fills = match_sell_order(
+                    order, depth, trades_for_sym, mode, sq or None, passive_fill_rate
+                )
             else:
                 continue
             symbol_fills.extend(fills)

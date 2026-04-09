@@ -118,10 +118,15 @@ class AgentMemory:
         self._update_best_status()
         self._save_cards()
 
-    def top_strategies(self, n: int = 10) -> list[dict[str, Any]]:
-        """Return top N strategy cards by PnL, excluding failures."""
+    def top_strategies(self, n: int = 10, sort_by: str = "pnl") -> list[dict[str, Any]]:
+        """Return top N strategy cards, excluding failures.
+
+        Args:
+            n: Number of cards to return.
+            sort_by: Field to sort by — ``"pnl"`` (default) or ``"transfer_score"``.
+        """
         valid = [c for c in self._cards if c.get("status") != "failed"]
-        valid.sort(key=lambda c: c.get("pnl", 0.0), reverse=True)
+        valid.sort(key=lambda c: c.get(sort_by, 0.0), reverse=True)
         return valid[:n]
 
     def failed_strategies(self, n: int = 5) -> list[dict[str, Any]]:

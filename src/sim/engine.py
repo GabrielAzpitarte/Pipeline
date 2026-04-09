@@ -35,6 +35,8 @@ class SimConfig:
     risk_limits: RiskLimits = field(default_factory=lambda: RiskLimits(max_order_size=9999))
     strategy_params: dict[str, Any] = field(default_factory=dict)
     data_split: float = 1.0
+    execution_mode: str = "baseline"  # "baseline" = current behavior
+    passive_fill_rate: float = 1.0  # 1.0 = fill all passive orders, <1.0 = stricter
 
 
 @dataclass
@@ -187,6 +189,7 @@ class SimEngine:
                 order_depths,
                 market_trades_mt,
                 self.config.trade_match_mode,
+                passive_fill_rate=self.config.passive_fill_rate,
             )
 
             # 7. Process fills — update PnL tracker and positions

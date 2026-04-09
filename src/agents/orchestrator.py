@@ -21,7 +21,6 @@ from agents.tools.strategy_tools import (
     cleanup_strategy,
     extract_all_params,
     extract_params,
-    generate_sweep_grid,
     load_strategy_module,
     parse_platform_log,
     register_strategy_import,
@@ -54,7 +53,7 @@ class BudgetTracker:
         default_factory=lambda: {
             "opus": (15.0, 75.0),
             "sonnet": (3.0, 15.0),
-            "gpt": (0.55, 2.20),  # o4-mini (reasoning)
+            "gpt": (2.00, 8.00),  # gpt-5.4
             "gemini": (2.00, 12.00),  # gemini-3.1-pro
         },
         repr=False,
@@ -107,6 +106,12 @@ class CandidateResult:
     faithful_metrics: dict[str, float] = field(default_factory=dict)
     test_passed: bool = False
     error: str | None = None
+    transfer_score: float = 0.0
+    verdict: str = "unknown"
+    scenario_gap: float = 0.0
+    passive_fill_share: float = 0.0
+    fragility_notes: list[str] = field(default_factory=list)
+    by_symbol: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +120,40 @@ class CandidateResult:
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
-    """Strip markdown fences and parse JSON from LLM response."""
+    """Strip markdown fences and parse JSON from LLM response.
+
+    Falls back to extracting code from ```python blocks if JSON parsing fails.
+    """
     text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
         text = text.rsplit("```", 1)[0].strip()
-    result: dict[str, Any] = json.loads(text)
+
+    try:
+        result: dict[str, Any] = json.loads(text)
+        return result
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: extract code from ```python blocks
+    import re
+
+    code_match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
+    if code_match:
+        code = code_match.group(1).strip()
+        return {"code": code, "default_params": {}}
+
+    # Second fallback: find "code" key with raw string
+    code_match = re.search(r'"code"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+    if code_match:
+        code = code_match.group(1).replace("\\n", "\n").replace('\\"', '"')
+        return {"code": code, "default_params": {}}
+
+    # Last resort: if it looks like Python code, use it directly
+    if "def " in text and "class " in text:
+        return {"code": text, "default_params": {}}
+
+    result = json.loads(text)  # will raise — let it propagate
     return result
 
 
@@ -140,7 +173,7 @@ class Orchestrator:
         max_rounds: int = 10,
         artifacts_dir: Path = Path("artifacts"),
         ideation_model: str = "claude-sonnet-4-20250514",
-        worker_model: str = "claude-opus-4-20250514",
+        worker_model: str = "claude-sonnet-4-20250514",
     ) -> None:
         from dotenv import load_dotenv
 
@@ -157,7 +190,30 @@ class Orchestrator:
         self.ideation_model = ideation_model
         self.worker_model = worker_model
         self._strategy_examples = self._load_strategy_examples()
-        self._swept_strategies: set[str] = set()
+
+        # Load second dataset for cross-day transfer evaluation
+        self._eval_datasets: list[BacktestData] = [data]
+        try:
+            d2_prices = Path("data_raw/prices_round_0_day_-2.csv")
+            d2_trades = Path("data_raw/trades_round_0_day_-2.csv")
+            if d2_prices.exists() and d2_trades.exists():
+                data_d2 = load_round_data(d2_prices, d2_trades)
+                self._eval_datasets.append(data_d2)
+                _log.info("Loaded day_-2 data for cross-day evaluation")
+        except Exception:
+            _log.warning("Could not load day_-2 data for cross-day evaluation")
+
+        # Compute asset intelligence briefing for strategists
+        try:
+            from agents.prompts.asset_briefing import generate_full_briefing
+            from analytics.market_intel import compute_all_intelligence
+
+            all_intel = compute_all_intelligence(self._eval_datasets)
+            self._asset_briefing = generate_full_briefing(all_intel)
+            _log.info("Asset intelligence briefing generated (%d chars)", len(self._asset_briefing))
+        except Exception:
+            self._asset_briefing = ""
+            _log.warning("Could not generate asset intelligence briefing")
 
         # Anthropic client (always available)
         self.client = anthropic.Anthropic()
@@ -249,7 +305,7 @@ class Orchestrator:
             oai_messages.append({"role": "system", "content": system})
         oai_messages.extend(messages)
 
-        model = "o4-mini"
+        model = "gpt-5.4"
         response = self._openai_client.chat.completions.create(
             model=model,
             max_completion_tokens=max_tokens,
@@ -281,20 +337,22 @@ class Orchestrator:
         models_to_try = ["gemini-3.1-pro-preview", "gemini-2.5-flash"]
 
         for attempt in range(5):
-            # Fall back to 2.5-flash after 3 failed attempts with 3.1-pro
-            model_name = models_to_try[0] if attempt < 3 else models_to_try[1]
+            # Fall back to 2.5-flash after 2 failed attempts with 3.1-pro
+            model_name = models_to_try[0] if attempt < 2 else models_to_try[1]
             try:
+                config = genai_types.GenerateContentConfig(
+                    max_output_tokens=effective_max,
+                    thinking_config=genai_types.ThinkingConfig(thinking_budget=16384),
+                    http_options={"timeout": 120_000},  # 2 min timeout
+                )
                 response = self._gemini_client.models.generate_content(
                     model=model_name,
                     contents="\n\n".join(prompt_parts),
-                    config=genai_types.GenerateContentConfig(
-                        max_output_tokens=effective_max,
-                        thinking_config=genai_types.ThinkingConfig(thinking_budget=16384),
-                    ),
+                    config=config,
                 )
             except Exception as api_err:
                 err_str = str(api_err)
-                if "503" in err_str or "UNAVAILABLE" in err_str or "capacity" in err_str.lower():
+                if any(k in err_str for k in ("503", "504", "UNAVAILABLE", "DEADLINE", "capacity")):
                     wait = 15 if attempt < 3 else 5  # longer wait for 3.1-pro, shorter for fallback
                     _log.warning(
                         "Gemini %s failed (attempt %d/5), retrying in %ds: %s",
@@ -366,12 +424,13 @@ class Orchestrator:
     # ---- Multi-model ideation ---------------------------------------------
 
     def _ideate(self, round_num: int) -> list[dict[str, Any]]:
-        """Propose candidates: Gemini 3.1 Pro (1 idea) + o4-mini (1 idea)."""
+        """Propose candidates: Gemini 3.1 Pro (1 idea) + GPT-5.4 (1 idea)."""
         candidates: list[dict[str, Any]] = []
         top = self.memory.top_strategies(10)
         failed = self.memory.failed_strategies(5)
         mechanics = self.memory.load_knowledge_file("mechanics.md")
-        products = self.memory.load_knowledge_file("product_briefs.md")
+        # Use computed asset intelligence briefing instead of static product_briefs.md
+        products = self._asset_briefing or self.memory.load_knowledge_file("product_briefs.md")
 
         best_card = self.memory.best_strategy_card()
         best_code = best_card.get("code", "") if best_card else ""
@@ -403,7 +462,7 @@ class Orchestrator:
             except Exception as exc:
                 _log.warning("Gemini ideation failed: %s", exc)
 
-        # OpenAI o4-mini ideation — 1 candidate (reasoning model)
+        # OpenAI GPT-5.4 ideation — 1 candidate
         if self._openai_client is not None:
             try:
                 system, messages = build_ideation_prompt(
@@ -433,12 +492,46 @@ class Orchestrator:
     # ---- Pipeline steps ---------------------------------------------------
 
     def _generate_code(self, candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        """Generate strategy code (Sonnet call). Returns (code, default_params)."""
+        """Generate strategy code (Opus call). Returns (code, default_params)."""
+        import re as _re
+
         base = candidate.get("base_strategy", "market_maker")
         base_code = self._strategy_examples.get(base, "")
         system, messages = build_patching_prompt(candidate, base_code)
-        result = self._call_anthropic(self.worker_model, messages, system=system)
-        return result.get("code", ""), result.get("default_params", {})
+
+        # Call with higher token limit for code generation
+        kwargs: dict[str, Any] = {
+            "model": self.worker_model,
+            "max_tokens": 4096,
+            "messages": messages,
+        }
+        if system:
+            kwargs["system"] = system
+        response = self.client.messages.create(**kwargs)
+        self.budget.record(
+            self.worker_model, response.usage.input_tokens, response.usage.output_tokens
+        )
+
+        block = response.content[0]
+        text: str = block.text if hasattr(block, "text") else str(block)
+
+        # Extract code from ```python block
+        code_match = _re.search(r"```python\s*\n(.*?)```", text, _re.DOTALL)
+        if code_match:
+            code = code_match.group(1).strip()
+        else:
+            # Fallback: try JSON parsing
+            try:
+                result = _parse_json_response(text)
+                code = result.get("code", "")
+            except (json.JSONDecodeError, ValueError):
+                code = text.strip()
+
+        # Fix escaped newlines if present
+        if "\\n" in code and "\n" not in code:
+            code = code.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+
+        return code, {}
 
     def _evaluate_candidate(
         self,
@@ -478,6 +571,39 @@ class Orchestrator:
                 name, self.data, params=params, fast=False, artifacts_dir=self.artifacts_dir
             )
             _log.info("Sim PnL: %.2f (%s)", cr.faithful_metrics.get("total_pnl", 0.0), source)
+
+            # Deep evaluation with transfer scoring
+            if cr.code:
+                from experiments.evaluator import evaluate_candidate as deep_evaluate
+
+                ev = deep_evaluate(
+                    name=name,
+                    strategy_source=cr.code,
+                    params={},
+                    datasets=self._eval_datasets,
+                )
+                cr.transfer_score = ev.transfer_score.score
+                cr.verdict = ev.verdict
+                cr.scenario_gap = ev.transfer_score.components.get("scenario_gap_penalty", 0.0)
+                cr.passive_fill_share = ev.fill_diagnostics.passive_fill_share
+                cr.fragility_notes = ev.fragility_notes
+                cr.by_symbol = {
+                    sym: {
+                        "transfer_score": ae.transfer_score,
+                        "raw_pnl": ae.raw_pnl,
+                        "verdict": ae.verdict,
+                        "passive_fill_share": ae.passive_fill_share,
+                        "scenario_gap": ae.scenario_gap,
+                        "fills": ae.fills,
+                    }
+                    for sym, ae in ev.by_symbol.items()
+                }
+                _log.info(
+                    "Transfer score: %.4f, verdict=%s (%s)",
+                    cr.transfer_score,
+                    cr.verdict,
+                    source,
+                )
 
         except Exception as exc:
             cr.error = str(exc)
@@ -552,6 +678,12 @@ class Orchestrator:
             "error": cr.error,
             "products": sorted(self.data.products),
             "failure_reason": failure_reason,
+            "transfer_score": cr.transfer_score,
+            "verdict": cr.verdict,
+            "scenario_gap": cr.scenario_gap,
+            "passive_fill_share": cr.passive_fill_share,
+            "fragility_notes": cr.fragility_notes,
+            "by_symbol": cr.by_symbol,
         }
 
         if not cr.error and pnl >= 0 and cr.code:
@@ -578,19 +710,15 @@ class Orchestrator:
             # Store strategy card immediately
             self.memory.add_strategy_card(self._build_strategy_card(cr, round_num))
 
-        # Auto-sweep any new strategy that enters top 5
-        self._maybe_sweep_new_top_strategies(results, round_num)
+        # Evaluate random variants of the best candidate
+        self._evaluate_variants(results, round_num)
 
-        # Prune code from cards outside top 5 to limit memory size
-        top5_names = {c["name"] for c in self.memory.top_strategies(5)}
-        for card in self.memory._cards:
-            if card.get("name") not in top5_names and "code" in card:
-                del card["code"]
+        # Keep all cards with code — strategists need full history to avoid repeating
         self.memory._save_cards()
 
         best = max(
             results,
-            key=lambda r: (r.faithful_metrics or {}).get("total_pnl", float("-inf")),
+            key=lambda r: r.transfer_score,
             default=None,
         )
 
@@ -648,14 +776,6 @@ class Orchestrator:
 
         rounds_completed = 0
 
-        # Sweep any existing top-5 cards that haven't been swept yet
-        for card in self.memory.top_strategies(5):
-            name = card.get("name", "")
-            code = card.get("code", "")
-            if code and name and name not in self._swept_strategies:
-                _log.info("Sweeping existing top card: %s", name)
-                self._auto_sweep(code, name, round_num=0)
-
         for round_num in range(1, self.max_rounds + 1):
             if self.budget.over_budget():
                 _log.info(
@@ -689,10 +809,10 @@ class Orchestrator:
                 }
             )
 
-        # Save top 1 overall strategy
+        # Save top 1 overall strategy (by transfer score)
         top_cards = sorted(
             [c for c in self.memory._cards if c.get("code") and c.get("pnl", 0) > 0],
-            key=lambda c: c.get("pnl", 0),
+            key=lambda c: c.get("transfer_score", 0),
             reverse=True,
         )[:1]
 
@@ -733,13 +853,18 @@ class Orchestrator:
         if not cards_with_pp:
             return None
 
-        # Find best card per product by fill count
+        # Find best card per product by per-asset transfer score
         best_per_product: dict[str, dict[str, Any]] = {}
         for card in cards_with_pp:
-            for prod, pm in card.get("per_product", {}).items():
-                fc = pm.get("fill_count", 0)
-                if prod not in best_per_product or fc > best_per_product[prod].get("_fills", 0):
-                    best_per_product[prod] = {**card, "_fills": fc}
+            # Try by_symbol (new per-asset scores) first, fall back to per_product
+            sym_data = card.get("by_symbol", {})
+            for prod in card.get("per_product", {}):
+                if prod in sym_data:
+                    score = sym_data[prod].get("transfer_score", 0)
+                else:
+                    score = card.get("per_product", {}).get(prod, {}).get("fill_count", 0)
+                if prod not in best_per_product or score > best_per_product[prod].get("_score", 0):
+                    best_per_product[prod] = {**card, "_score": score}
 
         if len(best_per_product) < 2:
             return None
@@ -753,10 +878,10 @@ class Orchestrator:
         # Log what we're combining
         for prod, card in sorted(best_per_product.items()):
             _log.info(
-                "Best for %s: %s (fills=%d, total_pnl=%.0f)",
+                "Best for %s: %s (asset_score=%.4f, total_pnl=%.0f)",
                 prod,
                 card.get("name", "?"),
-                card.get("_fills", 0),
+                card.get("_score", 0),
                 card.get("pnl", 0),
             )
 
@@ -810,69 +935,62 @@ class Orchestrator:
         _log.info("Assembled strategy card created: %s", assembled_name)
         return assembled_name
 
-    def _maybe_sweep_new_top_strategies(
-        self, results: list[CandidateResult], round_num: int
-    ) -> None:
-        """If any result enters top 5 cards, run a full parallel grid sweep."""
-        top5_names = {c["name"] for c in self.memory.top_strategies(5)}
-        for cr in results:
-            if (
-                cr.name in top5_names
-                and cr.code
-                and not cr.error
-                and cr.name not in self._swept_strategies
-            ):
-                self._auto_sweep(cr.code, cr.name, round_num)
-
-    def _auto_sweep(self, code: str, name: str, round_num: int) -> None:
-        """Full parallel grid sweep on a strategy. Adds top 3 results as new cards."""
-        from experiments.sweep_runner import run_sweep_parallel
-
-        params = extract_all_params(code)
-        if not params:
-            _log.info("No extractable params for %s, skipping sweep", name)
+    def _evaluate_variants(self, results: list[CandidateResult], round_num: int) -> None:
+        """Generate and evaluate random variants of the best candidate from this round."""
+        valid = [r for r in results if r.code and not r.error and r.transfer_score > 0]
+        if not valid:
             return
 
-        grid = generate_sweep_grid(params, n_values=3)
-        combos_count = 1
-        for vals in grid.values():
-            combos_count *= len(vals)
-        _log.info("Auto-sweeping %s: %d params, %d combos", name, len(grid), combos_count)
+        best = max(valid, key=lambda r: r.transfer_score)
+        params = extract_all_params(best.code)
+        if not params:
+            _log.info("No extractable params for %s, skipping variants", best.name)
+            return
 
-        sweep_results = run_sweep_parallel(
-            strategy_source=code,
-            param_grid=grid,
-            data=self.data,
-            max_workers=12,
-        )
+        from experiments.evaluator import evaluate_candidate as deep_evaluate
+        from experiments.evaluator import generate_random_variants
 
-        self._swept_strategies.add(name)
+        variants = generate_random_variants(best.code, params, n_variants=3, seed=round_num)
+        _log.info("Evaluating %d random variants of %s", len(variants), best.name)
 
-        # Add top 3 sweep results as new strategy cards
-        for rank, (sweep_params, metrics) in enumerate(sweep_results[:3], 1):
-            sweep_name = f"{name}_sweep_r{round_num}_{rank}"
-            sweep_code = apply_params_to_code(code, sweep_params)
-            pnl = metrics.get("total_pnl", 0.0)
-            self.memory.add_strategy_card(
-                {
-                    "name": sweep_name,
-                    "source_model": "sweep",
-                    "description": f"Sweep rank {rank} of {name} (round {round_num})",
-                    "pnl": pnl,
-                    "round": round_num,
-                    "params": sweep_params,
-                    "per_product": {},
-                    "strengths": f"Grid sweep winner #{rank}. Params: {sweep_params}",
-                    "status": "tested",
-                    "code": sweep_code,
-                }
+        for vname, vparams in variants:
+            variant_name = f"{best.name}_{vname}"
+            ev = deep_evaluate(
+                name=variant_name,
+                strategy_source=best.code,
+                params=vparams,
+                datasets=self._eval_datasets,
             )
             _log.info(
-                "Sweep card added: %s (PnL=%.2f, params=%s)",
-                sweep_name,
-                pnl,
-                sweep_params,
+                "Variant %s: transfer=%.4f, verdict=%s (vs best %.4f)",
+                variant_name,
+                ev.transfer_score.score,
+                ev.verdict,
+                best.transfer_score,
             )
+            if ev.transfer_score.score > best.transfer_score:
+                variant_code = apply_params_to_code(best.code, vparams)
+                self.memory.add_strategy_card(
+                    {
+                        "name": variant_name,
+                        "source_model": "variant",
+                        "description": f"Variant of {best.name} (round {round_num})",
+                        "pnl": ev.raw_pnl,
+                        "round": round_num,
+                        "params": vparams,
+                        "per_product": {},
+                        "strengths": f"Transfer score {ev.transfer_score.score:.4f}",
+                        "status": "tested",
+                        "code": variant_code,
+                        "transfer_score": ev.transfer_score.score,
+                        "verdict": ev.verdict,
+                        "scenario_gap": ev.transfer_score.components.get(
+                            "scenario_gap_penalty", 0.0
+                        ),
+                        "passive_fill_share": ev.fill_diagnostics.passive_fill_share,
+                        "fragility_notes": ev.fragility_notes,
+                    }
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -890,7 +1008,7 @@ def main() -> None:
     parser.add_argument("--max-rounds", type=int, default=10, help="Max optimization rounds")
     parser.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"))
     parser.add_argument("--ideation-model", default="claude-sonnet-4-20250514")
-    parser.add_argument("--worker-model", default="claude-opus-4-20250514")
+    parser.add_argument("--worker-model", default="claude-sonnet-4-20250514")
     args = parser.parse_args()
 
     data = load_round_data(args.data_prices, args.data_trades)
