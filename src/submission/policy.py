@@ -45,6 +45,7 @@ class PlatformPrediction:
     confidence: str  # "high" | "medium" | "low"
     method: str  # "family_ratio" | "global_ratio" | "fallback"
     n_calibration_points: int = 0
+    out_of_distribution: bool = False  # no similar family in calibration data
 
 
 def predict_platform_pnl(
@@ -106,6 +107,13 @@ def predict_platform_pnl(
 
     method = "family_ratio" if use_family else "global_ratio"
 
+    # Out-of-distribution detection
+    ood = False
+    if architecture_family and len(family_points) == 0:
+        pnl_range = [p.backtest_pnl for p in calibration_data if p.backtest_pnl > 0]
+        if pnl_range and (backtest_pnl < min(pnl_range) * 0.5 or backtest_pnl > max(pnl_range) * 2):
+            ood = True
+
     return PlatformPrediction(
         predicted_pnl=prediction,
         lower_bound=lower,
@@ -113,7 +121,48 @@ def predict_platform_pnl(
         confidence=confidence,
         method=method,
         n_calibration_points=len(ratios),
+        out_of_distribution=ood,
     )
+
+
+def rank_candidates_for_platform(
+    candidates: list[SubmissionCandidate],
+    calibration_data: list[CalibrationPoint],
+    tested_families: set[str] | None = None,
+) -> list[SubmissionCandidate]:
+    """Rank candidates by calibration-aware score, not raw transfer score.
+
+    Score = lower_bound * diversity_bonus * (1 - uncertainty_penalty) + transfer_weight
+    """
+    tested = tested_families or {
+        p.architecture_family for p in calibration_data if p.architecture_family
+    }
+    scored: list[tuple[float, SubmissionCandidate]] = []
+
+    for c in candidates:
+        pred = predict_platform_pnl(c.backtest_pnl, calibration_data, c.architecture_family)
+
+        # Base: conservative lower bound
+        base = pred.lower_bound
+
+        # Diversity bonus: untested family gets 20% boost
+        diversity = 1.2 if c.architecture_family not in tested else 1.0
+
+        # Uncertainty penalty
+        penalty = 0.0
+        if pred.confidence == "low":
+            penalty = 0.1
+        if pred.out_of_distribution:
+            penalty = 0.2
+
+        # Transfer weight: partial credit for local robustness
+        transfer_bonus = c.transfer_score * 500  # scale to PnL-like magnitude
+
+        score = base * diversity * (1 - penalty) + transfer_bonus
+        scored.append((score, c))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored]
 
 
 def should_submit(

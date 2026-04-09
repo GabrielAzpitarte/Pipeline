@@ -191,6 +191,10 @@ class Orchestrator:
         self.worker_model = worker_model
         self._strategy_examples = self._load_strategy_examples()
 
+        # Memory health audit
+        audit = self.memory.audit()
+        _log.info("Memory audit: %s", audit)
+
         # Load second dataset for cross-day transfer evaluation
         self._eval_datasets: list[BacktestData] = [data]
         try:
@@ -774,6 +778,19 @@ class Orchestrator:
         # Refresh opportunity allocation based on latest evidence
         self._refresh_opportunity()
 
+        # Diversity metrics
+        families = [self._classify_architecture(r) for r in results if r.code and not r.error]
+        unique_families = list(set(families))
+        if len(unique_families) <= 1 and len(families) >= 2:
+            _log.warning("LOW DIVERSITY: all %d candidates are %s", len(families), unique_families)
+        _log.info(
+            "Round %d diversity: %d families %s from %d candidates",
+            round_num,
+            len(unique_families),
+            unique_families,
+            len(results),
+        )
+
         return {
             "results": [
                 {
@@ -788,6 +805,11 @@ class Orchestrator:
             ],
             "best_name": best.name if best else None,
             "best_metrics": (best.faithful_metrics or {}) if best else {},
+            "diversity": {
+                "families": unique_families,
+                "n_families": len(unique_families),
+                "all_same_family": len(unique_families) <= 1 and len(families) >= 2,
+            },
         }
 
     def _update_knowledge(self, results: list[CandidateResult], round_num: int) -> None:
@@ -824,6 +846,12 @@ class Orchestrator:
         )
 
         rounds_completed = 0
+
+        # Preflight diversity check
+        _log.info("Preflight family coverage: %s", self.memory.family_distribution())
+        dead_ends = self.memory.detect_dead_ends()
+        if dead_ends:
+            _log.info("Preflight dead-end branches: %s", dead_ends[:5])
 
         for round_num in range(1, self.max_rounds + 1):
             if self.budget.over_budget():
@@ -904,7 +932,7 @@ class Orchestrator:
                     }
                 )
         except Exception:
-            _log.warning("Could not generate platform recommendations")
+            _log.exception("Platform recommendation failed — investigate")
 
         final: dict[str, Any] = {
             "rounds_completed": rounds_completed,

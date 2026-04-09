@@ -40,7 +40,9 @@ def test_baseline_pnl_frozen(name: str, backtest_data) -> None:
         pytest.skip(f"Strategy file not found: {source_path}")
 
     source = source_path.read_text()
-    _, _, metrics = _sweep_worker((0, {}, source, backtest_data, False, 1.0, "all", "none"))
+    _, _, metrics = _sweep_worker(
+        (0, {}, source, backtest_data, False, 1.0, "all", "none", "half", 0)
+    )
     actual_pnl = metrics["total_pnl"]
 
     assert abs(actual_pnl - expected_pnl) <= tolerance, (

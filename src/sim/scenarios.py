@@ -9,6 +9,7 @@ approximate real platform behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ QUEUE_HOSTILE = ExecutionScenario(
 PASSIVE_HOSTILE = ExecutionScenario(
     name="passive_hostile",
     passive_fill_rate=0.2,
+    trade_split="one_sided",
 )
 
 TAKER_FAVORABLE = ExecutionScenario(
@@ -47,9 +49,39 @@ TAKER_FAVORABLE = ExecutionScenario(
 ALL_SCENARIOS = [BASELINE, QUEUE_HOSTILE, PASSIVE_HOSTILE, TAKER_FAVORABLE]
 
 
+class ScenarioRegistry:
+    """Single source of truth for all execution scenarios."""
+
+    _scenarios: ClassVar[dict[str, ExecutionScenario]] = {}
+
+    @classmethod
+    def register(cls, scenario: ExecutionScenario) -> None:
+        """Register a scenario."""
+        cls._scenarios[scenario.name] = scenario
+
+    @classmethod
+    def get(cls, name: str) -> ExecutionScenario:
+        """Get a scenario by name. Raises ValueError if not found."""
+        if name not in cls._scenarios:
+            raise ValueError(f"Unknown scenario: {name!r}. Available: {list(cls._scenarios)}")
+        return cls._scenarios[name]
+
+    @classmethod
+    def all(cls) -> list[ExecutionScenario]:
+        """Return all registered scenarios."""
+        return list(cls._scenarios.values())
+
+    @classmethod
+    def names(cls) -> list[str]:
+        """Return all registered scenario names."""
+        return list(cls._scenarios.keys())
+
+
+# Register all presets
+for _s in ALL_SCENARIOS:
+    ScenarioRegistry.register(_s)
+
+
 def get_scenario(name: str) -> ExecutionScenario:
     """Look up a preset scenario by name."""
-    for s in ALL_SCENARIOS:
-        if s.name == name:
-            return s
-    raise ValueError(f"Unknown scenario: {name!r}. Available: {[s.name for s in ALL_SCENARIOS]}")
+    return ScenarioRegistry.get(name)

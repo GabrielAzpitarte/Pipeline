@@ -106,7 +106,9 @@ def match_buy_order(
             # Apply passive fill rate at same price (not price-through)
             available = mt.sell_quantity
             if mt.trade.price == order.price and passive_fill_rate < 1.0:
-                available = max(1, int(available * passive_fill_rate))
+                available = int(available * passive_fill_rate)
+                if available <= 0:
+                    continue
 
             fill_qty = min(remaining, available)
             fills.append(
@@ -184,7 +186,9 @@ def match_sell_order(
             # Apply passive fill rate at same price (not price-through)
             available = mt.buy_quantity
             if mt.trade.price == order.price and passive_fill_rate < 1.0:
-                available = max(1, int(available * passive_fill_rate))
+                available = int(available * passive_fill_rate)
+                if available <= 0:
+                    continue
 
             fill_qty = min(remaining, available)
             fills.append(

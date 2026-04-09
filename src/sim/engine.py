@@ -88,6 +88,8 @@ def run_simulation(
     passive_fill_rate: float = 1.0,
     queue_penetration: float = 1.0,
     queue_model: str = "none",
+    trade_split: str = "half",
+    latency_ticks: int = 0,
     data_split: float = 1.0,
     risk_limits: RiskLimits | None = None,
 ) -> SimResult:
@@ -121,7 +123,10 @@ def run_simulation(
 
     _log.info("Starting sim: %d ticks", len(timestamps))
 
-    for timestamp in timestamps:
+    # Pending orders for latency simulation
+    pending_orders: dict[int, dict[str, list[Any]]] = {}  # tick_index → orders
+
+    for tick_idx, timestamp in enumerate(timestamps):
         # 1. Build order depths and listings
         order_depths: dict[str, OrderDepth] = {}
         mid_prices = {}
@@ -153,10 +158,19 @@ def run_simulation(
                     timestamp=tr.timestamp,
                 )
                 trades_list.append(t)
-                half_qty = max(1, tr.quantity // 2)
-                if queue_penetration < 1.0 and half_qty > 0:
-                    half_qty = max(1, round(half_qty * queue_penetration))
-                mt_list.append(MarketTrade(trade=t, buy_quantity=half_qty, sell_quantity=half_qty))
+                # Build MarketTrade with trade_split policy
+                if trade_split == "one_sided":
+                    # Deterministic side selection based on trade content
+                    side = (tr.timestamp * 31 + tr.price * 17) % 2
+                    bq = tr.quantity if side == 0 else 0
+                    sq = tr.quantity if side == 1 else 0
+                else:  # "half" (default)
+                    bq = max(1, tr.quantity // 2)
+                    sq = bq
+                if queue_penetration < 1.0:
+                    bq = max(0, round(bq * queue_penetration)) if bq > 0 else 0
+                    sq = max(0, round(sq * queue_penetration)) if sq > 0 else 0
+                mt_list.append(MarketTrade(trade=t, buy_quantity=bq, sell_quantity=sq))
             raw_trades[product] = trades_list
             market_trades_mt[product] = mt_list
 
@@ -202,7 +216,15 @@ def run_simulation(
                 raw_orders = run_result
                 trader_data = ""
 
-        # 5. Enforce position limits
+        # 5. Apply latency: delay orders if latency_ticks > 0
+        if latency_ticks > 0:
+            # Store current orders for future tick
+            future_idx = tick_idx + latency_ticks
+            pending_orders[future_idx] = raw_orders
+            # Use matured orders from earlier ticks (if any)
+            raw_orders = pending_orders.pop(tick_idx, {})
+
+        # 6. Enforce position limits
         valid_orders = enforce_limits(raw_orders, positions)
 
         # 6. Build queue maps if queue model is active

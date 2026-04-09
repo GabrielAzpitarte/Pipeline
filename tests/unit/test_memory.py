@@ -80,13 +80,13 @@ class TestStrategyCards:
 
     def test_top_strategies(self) -> None:
         mem = AgentMemory()
-        mem.add_strategy_card({"name": "a", "pnl": 100.0})
-        mem.add_strategy_card({"name": "b", "pnl": 500.0})
-        mem.add_strategy_card({"name": "c", "pnl": 300.0})
+        mem.add_strategy_card({"name": "a", "pnl": 100.0, "transfer_score": 0.3})
+        mem.add_strategy_card({"name": "b", "pnl": 500.0, "transfer_score": 0.8})
+        mem.add_strategy_card({"name": "c", "pnl": 300.0, "transfer_score": 0.5})
         mem.add_strategy_card({"name": "d", "pnl": -50.0, "error": "crash"})
         top = mem.top_strategies(2)
         assert len(top) == 2
-        assert top[0]["name"] == "b"
+        assert top[0]["name"] == "b"  # highest transfer_score
         assert top[1]["name"] == "c"
 
     def test_failed_strategies(self) -> None:
@@ -152,12 +152,18 @@ class TestStrategyCards:
 
     def test_top_strategies_by_product(self) -> None:
         mem = AgentMemory()
-        mem.add_strategy_card({"name": "a", "pnl": 100.0, "products": ["EMERALDS"]})
-        mem.add_strategy_card({"name": "b", "pnl": 500.0, "products": ["TOMATOES"]})
-        mem.add_strategy_card({"name": "c", "pnl": 300.0, "products": ["EMERALDS", "TOMATOES"]})
+        mem.add_strategy_card(
+            {"name": "a", "pnl": 100.0, "transfer_score": 0.3, "products": ["EMERALDS"]}
+        )
+        mem.add_strategy_card(
+            {"name": "b", "pnl": 500.0, "transfer_score": 0.8, "products": ["TOMATOES"]}
+        )
+        mem.add_strategy_card(
+            {"name": "c", "pnl": 300.0, "transfer_score": 0.6, "products": ["EMERALDS", "TOMATOES"]}
+        )
         emerald_top = mem.top_strategies_by_product("EMERALDS", 2)
         assert len(emerald_top) == 2
-        assert emerald_top[0]["name"] == "c"
+        assert emerald_top[0]["name"] == "c"  # highest transfer_score for EMERALDS
 
     def test_clear_deletes_cards(self, tmp_path: Path) -> None:
         path = tmp_path / "mem.json"

@@ -207,14 +207,14 @@ Output a JSON object with ONE candidate. Be EXTREMELY SPECIFIC about the logic.
     {{
       "name": "short_snake_case_name",
       "description": "One-line summary of the architecture",
-      "base_strategy": "market_maker or fair_value or inventory_mm",
+      "base_strategy": "Choose: passive_maker | taker_pennying | pure_taker | mean_reversion_sniper | bifurcated_specialist | regime_switcher | cross_asset | inventory_hybrid",
       "novelty_type": "architecture_change or mechanism_tweak or parameter_tweak",
       "market_assumption": "What specific market property are you exploiting?",
       "transfer_argument": "Why should this work on the real platform, not just backtester?",
       "expected_failure_mode": "Most likely way this strategy fails",
+      "differentiation": "Why is this DIFFERENT from what already exists in the evidence pack? Reference a specific existing strategy.",
       "per_asset_logic": {{
-        "stationary_assets": "EXACT step-by-step logic for stationary/mean-reverting assets.",
-        "drifting_assets": "EXACT step-by-step logic for drifting/trending assets."
+        "Describe logic per asset profile. Use profiles from the asset briefing above. Example keys: stationary, drifting, regime_switching, taker_favorable. You only need entries for the profiles relevant to the current assets."
       }},
       "unwind_logic": "When and how to unwind inventory for ALL assets.",
       "key_innovation": "What makes this different from everything tried before."

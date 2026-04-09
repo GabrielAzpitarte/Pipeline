@@ -28,3 +28,9 @@ Before any of these actions, require written rationale:
 - Platform submission
 - Changing memory retrieval rules
 - Modifying the canonical artifact schema
+
+## Historical Trade Replay Policy
+- **Default: "half"** — each trade provides half its quantity to each side
+- **Rationale**: Aggressor side unknown from data. Half-split is conservative (better than full-both which doubled liquidity) but not maximally pessimistic
+- **Alternative: "one_sided"** — full quantity to one side only, deterministically chosen per trade. Used in hostile stress-test scenarios
+- **Passive fill rate**: Applied on top of trade split. With rate=0.2 and available=1, result is 0 fills (no minimum guarantee)

@@ -274,18 +274,19 @@ def _extract_metrics_from_result(sim_result: Any, data: BacktestData) -> dict[st
 
 
 def _sweep_worker(
-    args: tuple[int, dict[str, Any], str, BacktestData, bool, float, str, str],
+    args: tuple[int, dict[str, Any], str, BacktestData, bool, float, str, str, str, int],
 ) -> tuple[int, dict[str, Any], dict[str, float]]:
     """Run one sweep combo. Top-level function for ProcessPoolExecutor (picklable).
 
     Args:
         args: Tuple of (index, params, source_code, data, fast,
-              passive_fill_rate, trade_match_mode_str, queue_model).
+              passive_fill_rate, trade_match_mode_str, queue_model,
+              trade_split, latency_ticks).
 
     Returns:
         Tuple of (index, params, metrics_dict).
     """
-    index, params, source_code, data, _fast, passive_fill_rate, tmm_str, qm = args
+    index, params, source_code, data, _fast, passive_fill_rate, tmm_str, qm, ts, lt = args
 
     # Inject params and build Trader
     modified_source = _apply_params_to_source(source_code, params)
@@ -304,6 +305,8 @@ def _sweep_worker(
         passive_fill_rate=passive_fill_rate,
         trade_match_mode=tmm,
         queue_model=qm,
+        trade_split=ts,
+        latency_ticks=lt,
     )
 
     # Extract metrics from SimResult
@@ -338,7 +341,7 @@ def run_sweep_parallel(
 
     # Build task arguments (extra scenario params default to baseline)
     tasks = [
-        (i, combo, strategy_source, data, fast, passive_fill_rate, "all", "none")
+        (i, combo, strategy_source, data, fast, passive_fill_rate, "all", "none", "half", 0)
         for i, combo in enumerate(combos)
     ]
 

@@ -28,7 +28,7 @@ from experiments.sweep_runner import (
     _apply_params_to_source,
     _sweep_worker,
 )
-from sim.scenarios import ALL_SCENARIOS, ExecutionScenario
+from sim.scenarios import ALL_SCENARIOS, ExecutionScenario, ScenarioRegistry
 from trader.logging_utils import get_logger
 
 _log = get_logger("experiments.evaluator")
@@ -122,6 +122,13 @@ def evaluate_candidate(
     if scenarios is None:
         scenarios = list(ALL_SCENARIOS)
 
+    # Verify verdict logic has matching scenarios in registry
+    expected = {"baseline", "queue_hostile", "passive_hostile", "taker_favorable"}
+    available = set(ScenarioRegistry.names())
+    missing = expected - available
+    if missing:
+        _log.warning("Verdict expects scenarios not in registry: %s", missing)
+
     modified_source = _apply_params_to_source(strategy_source, params)
 
     # Run under each scenario x each dataset
@@ -138,6 +145,8 @@ def evaluate_candidate(
                 scenario.passive_fill_rate,
                 scenario.trade_match_mode,
                 scenario.queue_model,
+                scenario.trade_split,
+                scenario.latency_ticks,
             )
             _, _, metrics = _sweep_worker(task)
             scenario_metrics.append(metrics)

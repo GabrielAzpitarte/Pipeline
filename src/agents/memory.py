@@ -118,14 +118,14 @@ class AgentMemory:
         self._update_best_status()
         self._save_cards()
 
-    def top_strategies(self, n: int = 10, sort_by: str = "pnl") -> list[dict[str, Any]]:
-        """Return top N strategy cards, excluding failures.
+    def top_strategies(self, n: int = 10, sort_by: str = "transfer_score") -> list[dict[str, Any]]:
+        """Return top N strategy cards, excluding failures and deprecated.
 
         Args:
             n: Number of cards to return.
-            sort_by: Field to sort by — ``"pnl"`` (default) or ``"transfer_score"``.
+            sort_by: Field to sort by — ``"transfer_score"`` (default) or ``"pnl"``.
         """
-        valid = [c for c in self._cards if c.get("status") != "failed"]
+        valid = [c for c in self._cards if c.get("status") != "failed" and not c.get("deprecated")]
         valid.sort(key=lambda c: c.get(sort_by, 0.0), reverse=True)
         return valid[:n]
 
@@ -143,13 +143,15 @@ class AgentMemory:
         return None
 
     def top_strategies_by_product(self, product: str, n: int = 3) -> list[dict[str, Any]]:
-        """Return top N strategy cards targeting a specific product."""
+        """Return top N strategy cards targeting a specific product (by transfer score)."""
         valid = [
             c
             for c in self._cards
-            if c.get("status") != "failed" and product in c.get("products", [])
+            if c.get("status") != "failed"
+            and not c.get("deprecated")
+            and product in c.get("products", [])
         ]
-        valid.sort(key=lambda c: c.get("pnl", 0.0), reverse=True)
+        valid.sort(key=lambda c: c.get("transfer_score", 0.0), reverse=True)
         return valid[:n]
 
     def _update_best_status(self) -> None:
@@ -264,6 +266,30 @@ class AgentMemory:
                 card["deprecated"] = True
                 card["confidence"] = "stale"
         self._save_cards()
+
+    # ---- Audit -----------------------------------------------------------
+
+    def audit(self) -> dict[str, Any]:
+        """Report memory health before a run."""
+        max_round = max((c.get("round", 0) for c in self._cards), default=0)
+        stale = [
+            c
+            for c in self._cards
+            if not c.get("platform_tested")
+            and not c.get("deprecated")
+            and c.get("round", 0) < max_round - 10
+        ]
+        return {
+            "total_cards": len(self._cards),
+            "platform_tested": len(self.platform_proven()),
+            "deprecated": len(self.deprecated_cards()),
+            "stale_untested": len(stale),
+            "family_coverage": self.family_distribution(),
+            "fragile_examples": len(
+                [c for c in self._cards if c.get("verdict", "").endswith("fragile")]
+            ),
+            "robust_examples": len([c for c in self._cards if c.get("verdict") == "robust"]),
+        }
 
     # ---- Genealogy -------------------------------------------------------
 
