@@ -64,6 +64,7 @@ class TestGoldenMarketMaker:
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
             queue_penetration=1.0,
+            trade_split="half",  # legacy mode for golden test compatibility
         )
         result = SimEngine(config).run(data)
 
@@ -89,6 +90,7 @@ class TestGoldenFairValue:
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
             queue_penetration=1.0,
+            trade_split="half",  # legacy mode for golden test compatibility
         )
         result = SimEngine(config).run(data)
 
@@ -114,6 +116,7 @@ class TestGoldenInventoryMM:
             strategy_params=expected["params"],
             trade_match_mode=TradeMatchingMode.ALL,
             queue_penetration=1.0,
+            trade_split="half",  # legacy mode for golden test compatibility
         )
         result = SimEngine(config).run(data)
 

@@ -131,6 +131,11 @@ def build_ideation_prompt(
         for name in dead_ends:
             evidence_text += f"- {name}: all descendants failed or fragile\n"
 
+    # Family dominance warning
+    dominance = evidence_pack.get("family_dominance_warning")
+    if dominance:
+        evidence_text += f"\n### WARNING: {dominance}. Propose a DIFFERENT family.\n"
+
     # Family distribution + saturation warning
     if family_distribution:
         evidence_text += "\n### Family distribution\n"
@@ -212,6 +217,7 @@ Output a JSON object with ONE candidate. Be EXTREMELY SPECIFIC about the logic.
       "market_assumption": "What specific market property are you exploiting?",
       "transfer_argument": "Why should this work on the real platform, not just backtester?",
       "expected_failure_mode": "Most likely way this strategy fails",
+      "realism_vulnerability": "Which execution-realism axis would break this? Choose: queue_position | passive_fill_dependency | latency_sensitivity | inventory_trap | none_expected",
       "differentiation": "Why is this DIFFERENT from what already exists in the evidence pack? Reference a specific existing strategy.",
       "per_asset_logic": {{
         "Describe logic per asset profile. Use profiles from the asset briefing above. Example keys: stationary, drifting, regime_switching, taker_favorable. You only need entries for the profiles relevant to the current assets."

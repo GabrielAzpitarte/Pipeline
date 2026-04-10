@@ -106,3 +106,34 @@ class TestTradeSplitModes:
 
         result = run_simulation(trader_callable=trader, data=data, trade_split="one_sided")
         assert result.final_pnl != 0 or len(result.all_fills) >= 0  # just verify it runs
+
+
+class TestLatencyMechanics:
+    """Latency implementation must actually delay orders."""
+
+    def test_latency_reduces_fills(self) -> None:
+        """Orders delayed by latency_ticks should produce fewer fills."""
+        prices_path = Path("data_raw/prices_round_0_day_-1.csv")
+        if not prices_path.exists():
+            pytest.skip("Real data not available")
+
+        from data.parse_logs import load_round_data
+        from experiments.sweep_runner import _sweep_worker
+
+        data = load_round_data(prices_path, Path("data_raw/trades_round_0_day_-1.csv"))
+        source = Path("src/trader/strategies/market_maker.py").read_text()
+
+        # No latency
+        _, _, no_lat = _sweep_worker(
+            (0, {}, source, data, False, 1.0, "all", "none", "one_sided", 0)
+        )
+        # With latency
+        _, _, with_lat = _sweep_worker(
+            (0, {}, source, data, False, 1.0, "all", "none", "one_sided", 2)
+        )
+
+        # Latency should reduce fills because orders arrive late
+        assert with_lat["total_fills"] <= no_lat["total_fills"], (
+            f"Latency should reduce fills: no_lat={no_lat['total_fills']}, "
+            f"with_lat={with_lat['total_fills']}"
+        )

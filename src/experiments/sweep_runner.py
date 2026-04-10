@@ -341,7 +341,7 @@ def run_sweep_parallel(
 
     # Build task arguments (extra scenario params default to baseline)
     tasks = [
-        (i, combo, strategy_source, data, fast, passive_fill_rate, "all", "none", "half", 0)
+        (i, combo, strategy_source, data, fast, passive_fill_rate, "all", "none", "one_sided", 0)
         for i, combo in enumerate(combos)
     ]
 

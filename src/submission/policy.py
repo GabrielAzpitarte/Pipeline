@@ -14,6 +14,7 @@ from analytics.calibration import (
     CalibrationPoint,
     add_calibration_point,
     load_calibration,
+    predict_platform_pnl,
 )
 from trader.logging_utils import get_logger
 
@@ -35,94 +36,8 @@ class SubmissionCandidate:
     backtest_pnl: float = 0.0
 
 
-@dataclass
-class PlatformPrediction:
-    """Prediction of platform PnL with uncertainty bounds."""
-
-    predicted_pnl: float
-    lower_bound: float
-    upper_bound: float
-    confidence: str  # "high" | "medium" | "low"
-    method: str  # "family_ratio" | "global_ratio" | "fallback"
-    n_calibration_points: int = 0
-    out_of_distribution: bool = False  # no similar family in calibration data
-
-
-def predict_platform_pnl(
-    backtest_pnl: float,
-    calibration_data: list[CalibrationPoint],
-    architecture_family: str | None = None,
-) -> PlatformPrediction:
-    """Predict platform PnL with uncertainty from calibration data.
-
-    Uses backtest-to-platform ratio, optionally filtered by architecture family.
-    Returns prediction with confidence bounds.
-    """
-    if not calibration_data:
-        pred = backtest_pnl / 3.0
-        return PlatformPrediction(pred, pred * 0.5, pred * 1.5, "low", "fallback", 0)
-
-    # Filter by family if possible
-    family_points = [
-        p
-        for p in calibration_data
-        if architecture_family and p.architecture_family == architecture_family
-    ]
-    use_family = len(family_points) >= 3
-    points = family_points if use_family else calibration_data
-
-    # Compute ratios
-    ratios: list[float] = []
-    for p in points:
-        if p.backtest_pnl > 0 and p.platform_pnl > 0:
-            ratios.append(p.backtest_pnl / p.platform_pnl)
-
-    if not ratios:
-        pred = backtest_pnl / 3.0
-        return PlatformPrediction(pred, pred * 0.5, pred * 1.5, "low", "fallback", 0)
-
-    avg_ratio = sum(ratios) / len(ratios)
-    prediction = backtest_pnl / avg_ratio
-
-    # Uncertainty from ratio variance
-    if len(ratios) >= 2:
-        import statistics
-
-        std_ratio = statistics.stdev(ratios)
-        lower = (
-            backtest_pnl / (avg_ratio + 1.5 * std_ratio) if avg_ratio + 1.5 * std_ratio > 0 else 0
-        )
-        upper = backtest_pnl / max(0.1, avg_ratio - 1.5 * std_ratio)
-    else:
-        lower = prediction * 0.7
-        upper = prediction * 1.3
-
-    # Confidence
-    if use_family and len(family_points) >= 5:
-        confidence = "high"
-    elif len(ratios) >= 5:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    method = "family_ratio" if use_family else "global_ratio"
-
-    # Out-of-distribution detection
-    ood = False
-    if architecture_family and len(family_points) == 0:
-        pnl_range = [p.backtest_pnl for p in calibration_data if p.backtest_pnl > 0]
-        if pnl_range and (backtest_pnl < min(pnl_range) * 0.5 or backtest_pnl > max(pnl_range) * 2):
-            ood = True
-
-    return PlatformPrediction(
-        predicted_pnl=prediction,
-        lower_bound=lower,
-        upper_bound=upper,
-        confidence=confidence,
-        method=method,
-        n_calibration_points=len(ratios),
-        out_of_distribution=ood,
-    )
+# PlatformPrediction and predict_platform_pnl are now in analytics.calibration
+# (canonical prediction interface — imported above)
 
 
 def rank_candidates_for_platform(

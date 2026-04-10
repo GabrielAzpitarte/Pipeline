@@ -63,8 +63,10 @@ def save_calibration(points: list[CalibrationPoint], path: Path) -> None:
 
 
 def load_calibration(path: Path) -> list[CalibrationPoint]:
-    """Load calibration data from JSON, falling back to KNOWN_RESULTS."""
+    """Load calibration data from JSON. Seeds from KNOWN_RESULTS on first run."""
     if not path.exists():
+        # First run: persist seed data so future loads use the file
+        save_calibration(KNOWN_RESULTS, path)
         return list(KNOWN_RESULTS)
     raw: list[dict[str, Any]] = json.loads(path.read_text())
     points: list[CalibrationPoint] = []
@@ -205,3 +207,93 @@ def evaluate_calibration_quality(
         "n_families_with_data": float(len(family_consistency)),
         "avg_family_ratio_cv": sum(family_consistency.values()) / max(1, len(family_consistency)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Prediction primitives (canonical prediction interface)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlatformPrediction:
+    """Prediction of platform PnL with uncertainty bounds."""
+
+    predicted_pnl: float
+    lower_bound: float
+    upper_bound: float
+    confidence: str  # "high" | "medium" | "low"
+    method: str  # "family_ratio" | "global_ratio" | "fallback"
+    n_calibration_points: int = 0
+    out_of_distribution: bool = False
+
+
+def predict_platform_pnl(
+    backtest_pnl: float,
+    calibration_data: list[CalibrationPoint],
+    architecture_family: str | None = None,
+) -> PlatformPrediction:
+    """Predict platform PnL with uncertainty from calibration data.
+
+    Uses backtest-to-platform ratio, optionally filtered by architecture family.
+    This is the ONE canonical prediction interface — all consumers call this.
+    """
+    import statistics as _stats
+
+    if not calibration_data:
+        pred = backtest_pnl / 3.0
+        return PlatformPrediction(pred, pred * 0.5, pred * 1.5, "low", "fallback", 0)
+
+    family_points = [
+        p
+        for p in calibration_data
+        if architecture_family and p.architecture_family == architecture_family
+    ]
+    use_family = len(family_points) >= 3
+    points = family_points if use_family else calibration_data
+
+    ratios: list[float] = []
+    for p in points:
+        if p.backtest_pnl > 0 and p.platform_pnl > 0:
+            ratios.append(p.backtest_pnl / p.platform_pnl)
+
+    if not ratios:
+        pred = backtest_pnl / 3.0
+        return PlatformPrediction(pred, pred * 0.5, pred * 1.5, "low", "fallback", 0)
+
+    avg_ratio = sum(ratios) / len(ratios)
+    prediction = backtest_pnl / avg_ratio
+
+    if len(ratios) >= 2:
+        std_ratio = _stats.stdev(ratios)
+        lower = (
+            backtest_pnl / (avg_ratio + 1.5 * std_ratio) if avg_ratio + 1.5 * std_ratio > 0 else 0
+        )
+        upper = backtest_pnl / max(0.1, avg_ratio - 1.5 * std_ratio)
+    else:
+        lower = prediction * 0.7
+        upper = prediction * 1.3
+
+    if use_family and len(family_points) >= 5:
+        confidence = "high"
+    elif len(ratios) >= 5:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    method = "family_ratio" if use_family else "global_ratio"
+
+    ood = False
+    if architecture_family and len(family_points) == 0:
+        pnl_range = [p.backtest_pnl for p in calibration_data if p.backtest_pnl > 0]
+        if pnl_range and (backtest_pnl < min(pnl_range) * 0.5 or backtest_pnl > max(pnl_range) * 2):
+            ood = True
+
+    return PlatformPrediction(
+        predicted_pnl=prediction,
+        lower_bound=lower,
+        upper_bound=upper,
+        confidence=confidence,
+        method=method,
+        n_calibration_points=len(ratios),
+        out_of_distribution=ood,
+    )

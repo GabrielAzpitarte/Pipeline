@@ -632,3 +632,17 @@
 ## Round 1 results
 
 ## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+
+## Round 1 results
+- agent_r1_agent_r1_inventory_skewed_selective_penny_sniper (gemini): PnL=0 [BAD] — Inventory-skewed dynamic fair value that restricts passive pennying to high-edge
+- agent_r1_tomato_reversion_taker_with_emerald_anchor (openai): PnL=88 [weak] — Underexplored mean-reversion-sniper architecture: TOMATOES traded primarily as e

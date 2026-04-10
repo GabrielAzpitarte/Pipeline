@@ -37,6 +37,7 @@ class SimConfig:
     data_split: float = 1.0
     execution_mode: str = "baseline"  # "baseline" = current behavior
     passive_fill_rate: float = 1.0  # 1.0 = fill all passive orders, <1.0 = stricter
+    trade_split: str = "one_sided"  # "one_sided" | "half" (legacy) | "probabilistic"
 
 
 @dataclass
@@ -88,7 +89,7 @@ def run_simulation(
     passive_fill_rate: float = 1.0,
     queue_penetration: float = 1.0,
     queue_model: str = "none",
-    trade_split: str = "half",
+    trade_split: str = "one_sided",
     latency_ticks: int = 0,
     data_split: float = 1.0,
     risk_limits: RiskLimits | None = None,
@@ -160,13 +161,28 @@ def run_simulation(
                 trades_list.append(t)
                 # Build MarketTrade with trade_split policy
                 if trade_split == "one_sided":
-                    # Deterministic side selection based on trade content
+                    # Deterministic one-sided: trade goes to one side only
                     side = (tr.timestamp * 31 + tr.price * 17) % 2
                     bq = tr.quantity if side == 0 else 0
                     sq = tr.quantity if side == 1 else 0
-                else:  # "half" (default)
+                elif trade_split == "probabilistic":
+                    # Random one-sided with reproducible seed per trade
+                    import random as _random
+
+                    _rng = _random.Random(tr.timestamp * 1000 + tr.price)
+                    if _rng.random() > 0.5:
+                        bq, sq = tr.quantity, 0
+                    else:
+                        bq, sq = 0, tr.quantity
+                elif trade_split == "half":
+                    # Legacy: split between sides (creates artificial symmetric liquidity)
                     bq = max(1, tr.quantity // 2)
                     sq = bq
+                else:
+                    # Unknown mode — fall back to one_sided
+                    side = (tr.timestamp * 31 + tr.price * 17) % 2
+                    bq = tr.quantity if side == 0 else 0
+                    sq = tr.quantity if side == 1 else 0
                 if queue_penetration < 1.0:
                     bq = max(0, round(bq * queue_penetration)) if bq > 0 else 0
                     sq = max(0, round(sq * queue_penetration)) if sq > 0 else 0
@@ -316,6 +332,7 @@ class SimEngine:
             trade_match_mode=self.config.trade_match_mode,
             passive_fill_rate=self.config.passive_fill_rate,
             queue_penetration=self.config.queue_penetration,
+            trade_split=self.config.trade_split,
             data_split=self.config.data_split,
             risk_limits=self.config.risk_limits,
         )

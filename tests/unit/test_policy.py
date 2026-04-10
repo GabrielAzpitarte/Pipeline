@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from analytics.calibration import PlatformPrediction, predict_platform_pnl
 from submission.policy import (
-    PlatformPrediction,
     SubmissionCandidate,
-    predict_platform_pnl,
     rank_candidates_for_platform,
     recommend_for_platform,
 )

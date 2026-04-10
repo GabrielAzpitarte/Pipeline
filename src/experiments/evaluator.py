@@ -129,6 +129,24 @@ def evaluate_candidate(
     if missing:
         _log.warning("Verdict expects scenarios not in registry: %s", missing)
 
+    # Verify all scenario fields are exercised by at least one preset
+    _defaults = ExecutionScenario()
+    _active_fields = {
+        "passive_fill_rate",
+        "queue_model",
+        "trade_match_mode",
+        "trade_split",
+        "latency_ticks",
+    }
+    _used: set[str] = set()
+    for _s in ScenarioRegistry.all():
+        for _fn in _active_fields:
+            if getattr(_s, _fn) != getattr(_defaults, _fn):
+                _used.add(_fn)
+    _unused = _active_fields - _used
+    if _unused:
+        _log.warning("Scenario fields never exercised by any preset: %s", _unused)
+
     modified_source = _apply_params_to_source(strategy_source, params)
 
     # Run under each scenario x each dataset
@@ -372,6 +390,29 @@ def _assign_verdict(
     # Cross-day consistency
     if multi_scale.cross_day_consistency < 0.70:
         notes.append(f"low cross-day consistency ({multi_scale.cross_day_consistency:.2f})")
+
+    # Realism axis attribution
+    queue_drop = (baseline - queue_hostile) / baseline if baseline > 0 else 0
+    passive_drop = (baseline - passive_hostile) / baseline if baseline > 0 else 0
+    taker_gain = (taker_favorable - baseline) / baseline if baseline > 0 else 0
+
+    if queue_drop > 0.3 and passive_drop < 0.2:
+        notes.append(
+            f"primary weakness: queue position (queue drop {queue_drop:.0%}, passive drop only {passive_drop:.0%})"
+        )
+    elif passive_drop > 0.3 and queue_drop < 0.2:
+        notes.append(
+            f"primary weakness: passive fill dependency (passive drop {passive_drop:.0%}, queue drop only {queue_drop:.0%})"
+        )
+    elif queue_drop > 0.3 and passive_drop > 0.3:
+        notes.append(
+            f"overall execution fragility (queue {queue_drop:.0%}, passive {passive_drop:.0%})"
+        )
+
+    if taker_gain > 0.2:
+        notes.append(
+            f"strategy could be more aggressive (taker_favorable +{taker_gain:.0%} vs baseline)"
+        )
 
     # Simulator artifact: much worse under ALL stress scenarios
     stress_pnls = [queue_hostile, passive_hostile, taker_favorable]

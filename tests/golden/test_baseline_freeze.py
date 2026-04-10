@@ -41,7 +41,7 @@ def test_baseline_pnl_frozen(name: str, backtest_data) -> None:
 
     source = source_path.read_text()
     _, _, metrics = _sweep_worker(
-        (0, {}, source, backtest_data, False, 1.0, "all", "none", "half", 0)
+        (0, {}, source, backtest_data, False, 1.0, "all", "none", "one_sided", 0)
     )
     actual_pnl = metrics["total_pnl"]
 

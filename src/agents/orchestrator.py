@@ -775,7 +775,8 @@ class Orchestrator:
         # Update product knowledge with round results
         self._update_knowledge(results, round_num)
 
-        # Refresh opportunity allocation based on latest evidence
+        # Age out stale cards and refresh opportunity
+        self.memory.age_cards(round_num)
         self._refresh_opportunity()
 
         # Diversity metrics
@@ -913,20 +914,35 @@ class Orchestrator:
             from submission.policy import recommend_for_platform
 
             calibration_path = self.artifacts_dir / "calibration_data.json"
+            from analytics.calibration import load_calibration, predict_platform_pnl
+
+            calibration_data = load_calibration(calibration_path)
             recs = recommend_for_platform(self.memory, calibration_path, budget=3)
             for rec in recs:
+                # Get full calibration details for logging
+                pred = predict_platform_pnl(
+                    rec.backtest_pnl, calibration_data, rec.architecture_family
+                )
                 _log.info(
-                    "Platform recommendation: %s (predicted=%d, reason=%s, family=%s)",
+                    "Platform recommendation: %s — predicted=%d [%d-%d], "
+                    "confidence=%s, OOD=%s, family=%s, reason=%s",
                     rec.strategy_name,
-                    rec.local_prediction,
-                    rec.submission_reason,
+                    pred.predicted_pnl,
+                    pred.lower_bound,
+                    pred.upper_bound,
+                    pred.confidence,
+                    pred.out_of_distribution,
                     rec.architecture_family,
+                    rec.submission_reason,
                 )
                 platform_recs.append(
                     {
                         "name": rec.strategy_name,
-                        "prediction": rec.local_prediction,
-                        "confidence": rec.confidence,
+                        "prediction": pred.predicted_pnl,
+                        "lower_bound": pred.lower_bound,
+                        "upper_bound": pred.upper_bound,
+                        "confidence": pred.confidence,
+                        "out_of_distribution": pred.out_of_distribution,
                         "reason": rec.submission_reason,
                         "family": rec.architecture_family,
                     }

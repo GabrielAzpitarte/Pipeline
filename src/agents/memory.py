@@ -175,8 +175,8 @@ class AgentMemory:
     # ---- Evidence-aware retrieval ------------------------------------------
 
     def platform_proven(self) -> list[dict[str, Any]]:
-        """Return only platform-tested strategies."""
-        return [c for c in self._cards if c.get("platform_tested")]
+        """Return only platform-tested, non-deprecated strategies."""
+        return [c for c in self._cards if c.get("platform_tested") and not c.get("deprecated")]
 
     def by_verdict(self, verdict: str) -> list[dict[str, Any]]:
         """Return strategies with a specific verdict."""
@@ -226,8 +226,8 @@ class AgentMemory:
         )
         pack["robust_winners"] = robust[:2]
 
-        # Platform proven
-        proven = [c for c in self._cards if c.get("platform_tested")]
+        # Platform proven (exclude deprecated)
+        proven = [c for c in self._cards if c.get("platform_tested") and not c.get("deprecated")]
         pack["platform_proven"] = proven[:2]
 
         # Fragile examples (for learning what fails)
@@ -250,6 +250,18 @@ class AgentMemory:
 
         # Dead-end branches (don't repeat these)
         pack["dead_end_branches"] = self.detect_dead_ends()[:3]
+
+        # Family dominance warning
+        active_dist = self.family_distribution()
+        total_active = sum(active_dist.values())
+        if total_active > 0:
+            max_fam = max(active_dist, key=active_dist.get)  # type: ignore[arg-type]
+            max_count = active_dist[max_fam]
+            if max_count / total_active > 0.7:
+                pack["family_dominance_warning"] = (
+                    f"{max_fam} dominates with {max_count}/{total_active} "
+                    f"({max_count / total_active:.0%})"
+                )
 
         return pack
 
